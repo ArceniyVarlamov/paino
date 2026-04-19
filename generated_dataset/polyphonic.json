@@ -1,0 +1,70 @@
+{
+  "piece_name": "polyphonic",
+  "notes": [
+    {
+      "index": 0,
+      "pitch": 60,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 1,
+      "pitch": 64,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 2,
+      "pitch": 67,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 3,
+      "pitch": 62,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 4,
+      "pitch": 65,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 5,
+      "pitch": 69,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 6,
+      "pitch": 55,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 7,
+      "pitch": 59,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 8,
+      "pitch": 62,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 9,
+      "pitch": 60,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 10,
+      "pitch": 64,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 11,
+      "pitch": 67,
+      "nominal_duration": 0.75
+    },
+    {
+      "index": 12,
+      "pitch": 72,
+      "nominal_duration": 0.75
+    }
+  ]
+}

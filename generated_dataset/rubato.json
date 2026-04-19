@@ -1,0 +1,45 @@
+{
+  "piece_name": "rubato",
+  "notes": [
+    {
+      "index": 0,
+      "pitch": 60,
+      "nominal_duration": 0.5
+    },
+    {
+      "index": 1,
+      "pitch": 62,
+      "nominal_duration": 0.5
+    },
+    {
+      "index": 2,
+      "pitch": 64,
+      "nominal_duration": 0.5
+    },
+    {
+      "index": 3,
+      "pitch": 65,
+      "nominal_duration": 0.5
+    },
+    {
+      "index": 4,
+      "pitch": 67,
+      "nominal_duration": 0.5
+    },
+    {
+      "index": 5,
+      "pitch": 69,
+      "nominal_duration": 0.5
+    },
+    {
+      "index": 6,
+      "pitch": 71,
+      "nominal_duration": 0.5
+    },
+    {
+      "index": 7,
+      "pitch": 72,
+      "nominal_duration": 0.5
+    }
+  ]
+}
