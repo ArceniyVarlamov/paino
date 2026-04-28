@@ -17,7 +17,14 @@ for candidate in (PROJECT_ROOT, VENDOR_DIR):
 
 import mido
 
-from midi.real_orchestra_player import DynamicOrchestraPlayer
+from midi.real_orchestra_player import (
+    DynamicOrchestraPlayer,
+    ORCHESTRA_CHORUS_CC,
+    ORCHESTRA_EXPRESSION_CC,
+    ORCHESTRA_PAN_CC,
+    ORCHESTRA_REVERB_CC,
+    ORCHESTRA_VOLUME_CC,
+)
 from output_dispatcher import ScoreEventDispatcher, TempoTracker
 
 TICKS_PER_BEAT = 480
@@ -144,6 +151,24 @@ def assert_close(actual: float, expected: float, label: str) -> None:
         )
 
 
+def assert_control_sent(
+    records: list[dict[str, float | int | str]],
+    *,
+    channel: int,
+    control: int,
+    value: int,
+) -> None:
+    expected_status = 0xB0 | int(channel)
+    for record in records:
+        if (
+            int(record["status"]) == expected_status
+            and int(record["note"]) == int(control)
+            and int(record["velocity"]) == int(value)
+        ):
+            return
+    raise AssertionError(f"Missing CC{control}={value} on channel {channel}")
+
+
 def wait_for_record(
     mock_output: MockMidiOutput,
     *,
@@ -181,7 +206,12 @@ def main() -> int:
             mock.patch("pygame.midi.get_device_info", return_value=(b"mock", b"mock", 0, 1, 0)),
             mock.patch("pygame.midi.Output", return_value=mock_output),
         ):
-            player = DynamicOrchestraPlayer(orchestra_path, dispatcher, midi_output_id=0)
+            player = DynamicOrchestraPlayer(
+                orchestra_path,
+                dispatcher,
+                midi_output_id=0,
+                output_channel=0,
+            )
 
         final_tempo_ratio = TEMPO_RATIO
         try:
@@ -216,6 +246,38 @@ def main() -> int:
         finally:
             player.close()
             dispatcher.close()
+
+    expected_expression = int(round(127 * 0.40))
+    assert_control_sent(
+        mock_output.records,
+        channel=0,
+        control=ORCHESTRA_VOLUME_CC,
+        value=127,
+    )
+    assert_control_sent(
+        mock_output.records,
+        channel=0,
+        control=ORCHESTRA_EXPRESSION_CC,
+        value=expected_expression,
+    )
+    assert_control_sent(
+        mock_output.records,
+        channel=0,
+        control=ORCHESTRA_PAN_CC,
+        value=64,
+    )
+    assert_control_sent(
+        mock_output.records,
+        channel=0,
+        control=ORCHESTRA_REVERB_CC,
+        value=0,
+    )
+    assert_control_sent(
+        mock_output.records,
+        channel=0,
+        control=ORCHESTRA_CHORUS_CC,
+        value=0,
+    )
 
     note_records = [record for record in mock_output.records if record["event_type"] in {"note_on", "note_off"}]
     paired = pair_note_events(note_records)

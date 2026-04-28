@@ -1,0 +1,76 @@
+{
+  "study_mode": {
+    "directory": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode",
+    "left_midi": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/left_hand.mid",
+    "right_midi": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/right_hand.mid",
+    "left_json": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/left_hand.json",
+    "right_json": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/right_hand.json",
+    "split_strategy": "smart_hand_splitter",
+    "chord_epsilon": 0.03,
+    "left_notes": 3552,
+    "right_notes": 3604,
+    "left_score_states": 2751,
+    "right_score_states": 2317,
+    "left_summary": "3552 notes | range 24-83 | mean pitch 57.99",
+    "right_summary": "3604 notes | range 24-103 | mean pitch 74.74",
+    "left_profile_path": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/left_hand.hybrid_profile.json",
+    "right_profile_path": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/right_hand.hybrid_profile.json",
+    "left_calibration_command": [
+      "/opt/homebrew/opt/python@3.14/bin/python3.14",
+      "/Users/arceniy/Documents/Projects/Piano/calibrate_hybrid_profile.py",
+      "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/left_hand.json",
+      "--level",
+      "fast"
+    ],
+    "right_calibration_command": [
+      "/opt/homebrew/opt/python@3.14/bin/python3.14",
+      "/Users/arceniy/Documents/Projects/Piano/calibrate_hybrid_profile.py",
+      "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/right_hand.json",
+      "--level",
+      "fast"
+    ],
+    "prep_report": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/prep_report.json"
+  },
+  "epsilon_candidates": [
+    {
+      "chord_epsilon": 0.03,
+      "states": 2751,
+      "average_chord_size": 1.291167,
+      "p95_chord_size": 3,
+      "max_chord_size": 4,
+      "score": 0.0
+    },
+    {
+      "chord_epsilon": 0.025,
+      "states": 2751,
+      "average_chord_size": 1.291167,
+      "p95_chord_size": 3,
+      "max_chord_size": 4,
+      "score": 0.02
+    },
+    {
+      "chord_epsilon": 0.02,
+      "states": 2754,
+      "average_chord_size": 1.28976,
+      "p95_chord_size": 3,
+      "max_chord_size": 4,
+      "score": 0.04
+    },
+    {
+      "chord_epsilon": 0.04,
+      "states": 2750,
+      "average_chord_size": 1.291636,
+      "p95_chord_size": 3,
+      "max_chord_size": 4,
+      "score": 0.04
+    },
+    {
+      "chord_epsilon": 0.05,
+      "states": 2738,
+      "average_chord_size": 1.297297,
+      "p95_chord_size": 3,
+      "max_chord_size": 4,
+      "score": 0.08
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "format_version": 2,
+  "score_json": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/right_hand.json",
+  "generated_at": "2026-04-27T22:00:13.685370+00:00",
+  "tuning": {
+    "output_confirmation_events": 3,
+    "sigma": 2.5
+  },
+  "baseline_metrics": {
+    "objective": 51142.81709384188,
+    "offset_segments": 7,
+    "jump_segments": 6,
+    "offset_average_error": 342.4291208791209,
+    "offset_max_error": 2316,
+    "offset_final_error_sum": 2321,
+    "jump_average_error": 34.06458333333333,
+    "jump_max_error": 581,
+    "jump_final_error_sum": 6,
+    "jump_within5_mean": 6.666666666666667,
+    "jump_within5_max": 7,
+    "jump_failures": 0,
+    "steady_tempo_abs_dev": 0.11309872526708037
+  },
+  "best_metrics": {
+    "objective": 51136.93726365475,
+    "offset_segments": 7,
+    "jump_segments": 6,
+    "offset_average_error": 342.43956043956047,
+    "offset_max_error": 2316,
+    "offset_final_error_sum": 2321,
+    "jump_average_error": 34.05416666666667,
+    "jump_max_error": 581,
+    "jump_final_error_sum": 6,
+    "jump_within5_mean": 6.666666666666667,
+    "jump_within5_max": 7,
+    "jump_failures": 0,
+    "steady_tempo_abs_dev": 0.10360912465821466
+  },
+  "calibration": {
+    "level": "fast",
+    "modes": [
+      "clean"
+    ],
+    "starts": [
+      0,
+      50,
+      100,
+      289,
+      1158,
+      1737,
+      2316
+    ],
+    "offset_states": 260,
+    "max_starts": 7,
+    "jump_states": 80,
+    "jump_prime_states": 24,
+    "passes": 1,
+    "sigma": 2.5,
+    "search_preset": "quick",
+    "max_jump_scenarios": 6,
+    "parallel_workers": 1
+  }
+}

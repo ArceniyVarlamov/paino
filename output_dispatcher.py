@@ -46,6 +46,7 @@ class TempoObservation:
 class DispatchEvent:
     index: int
     timestamp: float
+    tempo_update: bool = True
 
 
 def _load_score(
@@ -146,7 +147,8 @@ class TempoTracker:
         initial_tempo_ratio: float = 1.0,
         min_tempo_ratio: float = 0.25,
         max_tempo_ratio: float = 4.0,
-        deadzone_ratio: float = 0.0,
+        deadzone_ratio: float = 0.02,
+        min_nominal_window: float = 0.18,
         variance_warn_threshold: float = 0.0,
         variance_log_interval: int = 1,
         idle_reset_seconds: float = 1.5,
@@ -159,6 +161,8 @@ class TempoTracker:
             raise ValueError("tempo ratio bounds must be positive")
         if min_tempo_ratio > max_tempo_ratio:
             raise ValueError("min_tempo_ratio must be <= max_tempo_ratio")
+        if min_nominal_window <= 0.0:
+            raise ValueError("min_nominal_window must be positive")
         if idle_reset_seconds <= 0.0:
             raise ValueError("idle_reset_seconds must be positive")
 
@@ -193,6 +197,7 @@ class TempoTracker:
         self.min_tempo_ratio = float(min_tempo_ratio)
         self.max_tempo_ratio = float(max_tempo_ratio)
         self.deadzone_ratio = float(deadzone_ratio)
+        self.min_nominal_window = float(min_nominal_window)
         self.variance_warn_threshold = float(variance_warn_threshold)
         self.variance_log_interval = int(variance_log_interval)
         self.idle_reset_seconds = float(idle_reset_seconds)
@@ -202,6 +207,9 @@ class TempoTracker:
         self.recent_tempo_ratios: Deque[float] = deque(
             [self.tempo_ratio],
             maxlen=self.history_size,
+        )
+        self.recent_control_points: Deque[tuple[int, float]] = deque(
+            maxlen=self.history_size + 1,
         )
         self.last_variance = 0.0
         self._update_count = 0
@@ -222,6 +230,8 @@ class TempoTracker:
             self.last_index = int(score_index)
             self.last_position = position
             self.last_change_timestamp = event_time
+            self.recent_control_points.clear()
+            self.recent_control_points.append((position, event_time))
             return self.tempo_ratio
 
         idle_gap = event_time - self.last_change_timestamp
@@ -230,35 +240,75 @@ class TempoTracker:
             self.last_index = int(score_index)
             self.last_position = position
             self.last_change_timestamp = event_time
+            self.recent_control_points.append((position, event_time))
             return self.tempo_ratio
 
         if position == self.last_position:
             return self.tempo_ratio
 
-        nominal_elapsed = abs(
-            float(self.cumulative_nominal_time[position] - self.cumulative_nominal_time[self.last_position])
-        )
-        actual_elapsed = max(self._MIN_ELAPSED, idle_gap)
-        raw_ratio = float(
-            np.clip(
-                nominal_elapsed / actual_elapsed,
-                self.min_tempo_ratio,
-                self.max_tempo_ratio,
+        self.recent_control_points.append((position, event_time))
+        raw_observations: list[TempoObservation] = []
+
+        for anchor_position, anchor_time in self.recent_control_points:
+            if anchor_position == position:
+                continue
+
+            nominal_elapsed = abs(float(self.nominal_onsets[position] - self.nominal_onsets[anchor_position]))
+            if nominal_elapsed <= self._MIN_ELAPSED:
+                nominal_elapsed = abs(
+                    float(self.cumulative_nominal_time[position] - self.cumulative_nominal_time[anchor_position])
+                )
+            if nominal_elapsed < self.min_nominal_window:
+                continue
+
+            actual_elapsed = max(self._MIN_ELAPSED, abs(event_time - anchor_time))
+            raw_ratio = float(
+                np.clip(
+                    nominal_elapsed / actual_elapsed,
+                    self.min_tempo_ratio,
+                    self.max_tempo_ratio,
+                )
             )
-        )
-        observation = TempoObservation(
-            nominal_elapsed=nominal_elapsed,
-            actual_elapsed=actual_elapsed,
-            raw_ratio=raw_ratio,
-        )
-        self.recent_observations.append(observation)
-        history = np.asarray(
-            [sample.raw_ratio for sample in self.recent_observations],
-            dtype=np.float64,
-        )
-        self.tempo_ratio = float(np.mean(history, dtype=np.float64))
-        self.last_variance = float(np.var(history, dtype=np.float64))
-        self.recent_tempo_ratios.append(float(self.tempo_ratio))
+            raw_observations.append(
+                TempoObservation(
+                    nominal_elapsed=nominal_elapsed,
+                    actual_elapsed=actual_elapsed,
+                    raw_ratio=raw_ratio,
+                )
+            )
+
+        if raw_observations:
+            representative_observation = max(
+                raw_observations,
+                key=lambda observation: observation.nominal_elapsed,
+            )
+            self.recent_observations.append(representative_observation)
+            previous_ratio = float(self.tempo_ratio)
+            history = np.asarray(
+                [sample.raw_ratio for sample in self.recent_observations],
+                dtype=np.float64,
+            )
+            smoothed_ratio = float(np.median(history))
+            if self.smoothing_factor < 1.0:
+                smoothed_ratio = float(
+                    previous_ratio
+                    + (np.clip(self.smoothing_factor, 0.0, 1.0) * (smoothed_ratio - previous_ratio))
+                )
+            baseline = max(abs(previous_ratio), self._MIN_ELAPSED)
+            relative_change = abs(smoothed_ratio - previous_ratio) / baseline
+            if relative_change >= self.deadzone_ratio:
+                self.tempo_ratio = smoothed_ratio
+            self.last_variance = float(np.var(history, dtype=np.float64))
+            self.recent_tempo_ratios.append(float(self.tempo_ratio))
+        elif self.recent_observations:
+            history = np.asarray(
+                [sample.raw_ratio for sample in self.recent_observations],
+                dtype=np.float64,
+            )
+            self.last_variance = float(np.var(history, dtype=np.float64))
+        else:
+            self.last_variance = 0.0
+
         self._update_count += 1
 
         self.last_index = int(score_index)
@@ -271,6 +321,7 @@ class TempoTracker:
         self.recent_observations.clear()
         self.recent_tempo_ratios.clear()
         self.recent_tempo_ratios.append(self.tempo_ratio)
+        self.recent_control_points.clear()
         self.last_index = None
         self.last_position = None
         self.last_change_timestamp = None
@@ -321,6 +372,7 @@ class ScoreEventDispatcher:
 
         self.current_index: int | None = None
         self.current_tempo_ratio = float(self.tempo_tracker.tempo_ratio)
+        self.current_event_timestamp: float | None = None
         self.last_broadcast_wall_time: float | None = None
 
         if autostart:
@@ -349,9 +401,13 @@ class ScoreEventDispatcher:
             if callback in self._callbacks:
                 self._callbacks.remove(callback)
 
-    def broadcast(self, current_index: int, timestamp: float) -> None:
+    def broadcast(self, current_index: int, timestamp: float, *, tempo_update: bool = True) -> None:
         self.start()
-        event = DispatchEvent(index=int(current_index), timestamp=float(timestamp))
+        event = DispatchEvent(
+            index=int(current_index),
+            timestamp=float(timestamp),
+            tempo_update=bool(tempo_update),
+        )
         self.last_broadcast_wall_time = time.monotonic()
 
         try:
@@ -377,6 +433,22 @@ class ScoreEventDispatcher:
                 return True
             time.sleep(0.01)
         return self._queue.unfinished_tasks == 0
+
+    def clear_pending(self) -> int:
+        cleared = 0
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+
+            self._queue.task_done()
+            if item is self._SENTINEL:
+                self._queue.put_nowait(item)
+                break
+
+            cleared += 1
+        return cleared
 
     def close(self, timeout: float = 1.0) -> None:
         thread: threading.Thread | None
@@ -425,9 +497,13 @@ class ScoreEventDispatcher:
                     return
 
                 assert isinstance(item, DispatchEvent)
-                tempo_ratio = self.tempo_tracker.update(item.index, item.timestamp)
+                if item.tempo_update:
+                    tempo_ratio = float(self.tempo_tracker.update(item.index, item.timestamp))
+                else:
+                    tempo_ratio = float(self.current_tempo_ratio)
                 self.current_index = item.index
                 self.current_tempo_ratio = tempo_ratio
+                self.current_event_timestamp = item.timestamp
 
                 with self._callbacks_lock:
                     callbacks = tuple(self._callbacks)
@@ -484,14 +560,14 @@ class MockOrchestraPlayer:
 
 
 class PygameMidiOrchestra:
-    """Play short orchestral accompaniment chords from dispatcher updates."""
+    """Play short MIDI piano accompaniment chords from dispatcher updates."""
 
     def __init__(
         self,
         dispatcher: ScoreEventDispatcher,
         score_json: str | Path | dict[str, Any] | list[dict[str, Any]],
         *,
-        instrument_program: int = 48,
+        instrument_program: int = 0,
         midi_channel: int = 0,
         velocity: int = 76,
         base_chord_duration: float = 0.42,
@@ -514,8 +590,12 @@ class PygameMidiOrchestra:
         self.index_to_position = {
             int(score_index): position for position, score_index in enumerate(self.state_indices)
         }
+        self.score_chords = [
+            sorted({int(np.clip(pitch, 0, 127)) for pitch in _note_pitches(note)})
+            for note in notes
+        ]
         self.score_pitches = np.asarray(
-            [_representative_pitch(note) for note in notes],
+            [max(chord) for chord in self.score_chords],
             dtype=np.int64,
         )
 
@@ -622,7 +702,7 @@ class PygameMidiOrchestra:
             self._output = pygame.midi.Output(output_id, latency=0)
             self._output.set_instrument(self.instrument_program, self.midi_channel)
             self.is_available = True
-            self.status_label = f"Strings via MIDI (Program {self.instrument_program})"
+            self.status_label = f"Piano via MIDI (Program {self.instrument_program})"
         except Exception:
             self.logger.exception("Failed to initialize MIDI orchestra")
             self.status_label = "MIDI orchestra unavailable"
@@ -653,16 +733,7 @@ class PygameMidiOrchestra:
 
     def _chord_for_index(self, score_index: int) -> list[int]:
         position = self._position_for_index(score_index)
-        melody_pitch = int(self.score_pitches[position])
-        pitch_class = melody_pitch % 12
-        bass_root = 36 + pitch_class
-        while bass_root > 52:
-            bass_root -= 12
-        while bass_root < 24:
-            bass_root += 12
-
-        chord = [bass_root, min(127, bass_root + 7), min(127, bass_root + 12)]
-        return sorted({int(np.clip(note, 0, 127)) for note in chord})
+        return list(self.score_chords[position])
 
     def _release_if_current(self, token: int) -> None:
         with self._lock:

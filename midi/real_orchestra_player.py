@@ -11,7 +11,8 @@ import threading
 import time
 import urllib.request
 import zipfile
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -55,6 +56,13 @@ DEFAULT_STRINGS_CACHE_DIR = PROJECT_ROOT / "assets" / "orchestra_samples" / "phi
 GM_PIANO_PROGRAMS = set(range(8))
 SAMPLE_CHANNEL_START = 64
 SAMPLE_CHANNEL_END = 128
+ORCHESTRA_EXPRESSION_CC = 11
+ORCHESTRA_VOLUME_CC = 7
+ORCHESTRA_PAN_CC = 10
+ORCHESTRA_REVERB_CC = 91
+ORCHESTRA_CHORUS_CC = 93
+ORCHESTRA_VOLUME_MIN = 0.05
+ORCHESTRA_VOLUME_MAX = 2.0
 PHILHARMONIA_NOTE_TO_SEMITONE = {
     "C": 0,
     "Cs": 1,
@@ -73,6 +81,38 @@ _SAMPLE_NAME_RE = re.compile(
     r"^Strings/(?P<family>cello|double bass|viola|violin)/"
     r"[^/]+_(?P<note>[A-G]s?\d)_(?P<length>025|05|1|15)_(?P<dynamic>[a-z-]+)_arco-normal\.mp3$"
 )
+
+
+def available_midi_output_devices() -> list[tuple[int, str]]:
+    outputs: list[tuple[int, str]] = []
+    for device_id in range(pygame.midi.get_count()):
+        info = pygame.midi.get_device_info(device_id)
+        if info is None or not bool(info[3]):
+            continue
+        outputs.append((int(device_id), info[1].decode(errors="ignore")))
+    return outputs
+
+
+def describe_available_midi_output_devices() -> str:
+    outputs = available_midi_output_devices()
+    if not outputs:
+        return "No MIDI output devices found."
+    return "\n".join(f"  - {device_id}: {device_name}" for device_id, device_name in outputs)
+
+
+def clamp_orchestra_mix(value: float) -> float:
+    return float(np.clip(float(value), ORCHESTRA_VOLUME_MIN, ORCHESTRA_VOLUME_MAX))
+
+
+def apply_orchestra_mix_level(base_level: float, mix_scale: float) -> float:
+    normalized_level = float(np.clip(float(base_level), 0.0, 1.0))
+    normalized_mix = clamp_orchestra_mix(mix_scale)
+    if normalized_mix <= 1.0:
+        return float(np.clip(normalized_level * normalized_mix, 0.0, 1.0))
+
+    boost_progress = (normalized_mix - 1.0) / max(1e-6, ORCHESTRA_VOLUME_MAX - 1.0)
+    boosted_level = normalized_level + ((1.0 - normalized_level) * boost_progress)
+    return float(np.clip(boosted_level, 0.0, 1.0))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -117,6 +157,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "MIDI output device ID for orchestra playback. "
             "Use -1 to select the system default output automatically."
+        ),
+    )
+    parser.add_argument(
+        "--force-instrument",
+        type=int,
+        default=None,
+        help=(
+            "Optional General MIDI program override (0-127). "
+            "When set, suppress original program changes and force this instrument."
         ),
     )
     return parser
@@ -385,16 +434,21 @@ class ScheduledNoteOff:
     channel: int
     note: int
     generation: int
+    note_key: tuple[int, int, int] = field(compare=False)
 
 
 class DynamicOrchestraPlayer:
     """Slave orchestra transport driven by the dispatcher master clock."""
 
     _MIN_TEMPO_RATIO = 0.25
-    _WAIT_GRANULARITY = 0.010
+    # 2 ms is a reasonable compromise: tighter note scheduling without
+    # turning the idle worker into a CPU-hungry busy poller.
+    _WAIT_GRANULARITY = 0.002
     _MAX_INTER_EVENT_GAP = 0.050
-    _BACKWARD_RESET_THRESHOLD = 1.0
-    _FORWARD_SEEK_INDEX_THRESHOLD = 4
+    _SEEK_TIME_THRESHOLD = 1.0
+    _TEMPO_SMOOTHING_WINDOW = 5
+    _TEMPO_DEADZONE_RATIO = 0.02
+    _MERGED_CHANNEL_FILTERED_CONTROLS = frozenset({7, 10, 91, 93, 121, 123})
 
     def __init__(
         self,
@@ -402,25 +456,56 @@ class DynamicOrchestraPlayer:
         dispatcher: ScoreEventDispatcher,
         *,
         midi_output_id: int = -1,
+        output_channel: int | None = None,
+        channel_offset: int = 0,
+        force_instrument: int | None = None,
+        volume_scale: float = 1.0,
         midi_output: Any | None = None,
         time_source: Callable[[], float] | None = None,
+        wall_clock: Callable[[], float] | None = None,
     ) -> None:
         self._midi_path = Path(orchestra_midi_path)
         self._dispatcher = dispatcher
         self._requested_midi_output_id = int(midi_output_id)
+        self._forced_output_channel = (
+            None if output_channel is None else int(max(0, min(15, output_channel)))
+        )
+        self._channel_offset = int(max(0, min(15, channel_offset)))
+        self._force_instrument = (
+            None if force_instrument is None else int(np.clip(force_instrument, 0, 127))
+        )
+        self._volume_scale = clamp_orchestra_mix(volume_scale)
         self._injected_output = midi_output
         self._clock = time_source or time.time
+        self._wall_clock = wall_clock or time.time
         self._logger = logging.getLogger(self.__class__.__name__)
         self._tempo_ratio = 1.0
+        self._playback_tempo_ratio = 1.0
+        self._tempo_history: deque[float] = deque(
+            [self._playback_tempo_ratio],
+            maxlen=self._TEMPO_SMOOTHING_WINDOW,
+        )
         self._tempo_lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._note_off_thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._initialized_midi = False
+        self._owns_output = midi_output is None
         self._output: pygame.midi.Output | None = None
+        self._resolved_midi_output_id = -1
+        self._output_lock = threading.RLock()
         self.status_label = "Real MIDI output"
         self._master_index: int | None = None
         self._master_target_time: float | None = self._initial_master_target_time()
+        self._master_anchor_clock_time: float | None = (
+            self._clock() if self._master_target_time is not None else None
+        )
+        self._master_next_target_time: float | None = self._initial_master_next_target_time()
+        self._transport_paused = False
+        self._transport_generation = 0
+        self._observed_output_channels: set[int] = set()
+        self._program_history_by_output_channel: dict[int, list[tuple[float, int]]] = {}
         self._scheduled_events = self._load_scheduled_events()
         self._source_times = np.asarray(
             [event.source_time for event in self._scheduled_events],
@@ -433,12 +518,35 @@ class DynamicOrchestraPlayer:
         self._last_emit_wall_time: float | None = None
         self._pending_note_offs: list[ScheduledNoteOff] = []
         self._note_off_counter = 0
-        self._pending_note_offs_lock = threading.Lock()
-        self._active_note_generations: dict[tuple[int, int], int] = {}
+        self._note_off_lock = threading.Lock()
+        self._note_off_condition = threading.Condition(self._note_off_lock)
+        self._active_note_generations: dict[tuple[int, int, int], int] = {}
         self._note_generation_counter = 0
 
         self._dispatcher.subscribe(self.handle_dispatch)
         self._open_output()
+
+    @property
+    def playback_tempo_ratio(self) -> float:
+        with self._tempo_lock:
+            return float(self._playback_tempo_ratio)
+
+    @property
+    def midi_output_id(self) -> int:
+        return int(self._resolved_midi_output_id)
+
+    def set_volume_scale(self, volume_scale: float) -> None:
+        with self._output_lock:
+            self._volume_scale = clamp_orchestra_mix(volume_scale)
+            self._apply_master_output_level()
+
+    @property
+    def shared_output(self) -> pygame.midi.Output | None:
+        return self._output
+
+    @property
+    def output_lock(self) -> Any:
+        return self._output_lock
 
     def start(self) -> None:
         with self._lock:
@@ -451,27 +559,47 @@ class DynamicOrchestraPlayer:
                 name="DynamicOrchestraPlayer",
                 daemon=True,
             )
+            self._note_off_thread = threading.Thread(
+                target=self._note_off_loop,
+                name="DynamicOrchestraNoteOffs",
+                daemon=True,
+            )
             self._thread.start()
+            self._note_off_thread.start()
 
     def close(self, timeout: float = 1.0) -> None:
         self._dispatcher.unsubscribe(self.handle_dispatch)
+        self.halt()
 
-        thread: threading.Thread | None
+        transport_thread: threading.Thread | None
+        note_off_thread: threading.Thread | None
         with self._lock:
             self._stop_event.set()
-            thread = self._thread
+            transport_thread = self._thread
+            note_off_thread = self._note_off_thread
 
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
+        with self._note_off_condition:
+            self._note_off_condition.notify_all()
+
+        if transport_thread is not None and transport_thread.is_alive():
+            transport_thread.join(timeout=timeout)
+        if note_off_thread is not None and note_off_thread.is_alive():
+            note_off_thread.join(timeout=timeout)
 
         with self._lock:
-            if self._thread is thread and (thread is None or not thread.is_alive()):
+            if self._thread is transport_thread and (
+                transport_thread is None or not transport_thread.is_alive()
+            ):
                 self._thread = None
+            if self._note_off_thread is note_off_thread and (
+                note_off_thread is None or not note_off_thread.is_alive()
+            ):
+                self._note_off_thread = None
 
-        self._panic_all_notes_off()
+        self.panic()
         output = self._output
         self._output = None
-        if output is not None:
+        if output is not None and self._owns_output:
             output.close()
 
         if self._initialized_midi and pygame.midi.get_init():
@@ -483,12 +611,36 @@ class DynamicOrchestraPlayer:
         thread = self._thread
         return thread is not None and thread.is_alive()
 
+    def resume(self) -> None:
+        with self._tempo_lock:
+            if not self._transport_paused:
+                return
+            self._transport_paused = False
+            self._transport_generation += 1
+
+    def halt(self) -> None:
+        with self._tempo_lock:
+            self._transport_paused = True
+            self._transport_generation += 1
+            self._master_index = None
+            self._master_target_time = None
+            self._master_anchor_clock_time = None
+            self._master_next_target_time = None
+            self._seek_request_time = None
+        self.panic()
+
     def panic(self) -> None:
-        self._panic_all_notes_off()
-        with self._pending_note_offs_lock:
+        active_notes: list[tuple[int, int]] = []
+        with self._note_off_condition:
+            active_notes = sorted({(note_key[1], note_key[2]) for note_key in self._active_note_generations})
             self._pending_note_offs.clear()
             self._active_note_generations.clear()
-        self._note_off_counter = 0
+            self._note_off_counter = 0
+            self._note_generation_counter = 0
+            self._note_off_condition.notify_all()
+        for channel, note in active_notes:
+            self._send_note_off(channel, note)
+        self._send_full_panic()
         self._last_emit_wall_time = None
 
     def reset_to_start(self) -> None:
@@ -498,30 +650,47 @@ class DynamicOrchestraPlayer:
     def handle_dispatch(self, index: int, tempo_ratio: float) -> None:
         new_index = int(index)
         new_target_time = self._score_index_to_target_time(new_index)
+        new_next_target_time = self._score_index_to_next_target_time(new_index)
+        new_anchor_clock_time = self._clock()
         with self._tempo_lock:
-            self._tempo_ratio = max(self._MIN_TEMPO_RATIO, float(tempo_ratio))
             previous_index = self._master_index
             previous_target_time = self._master_target_time
-            self._master_index = new_index
-            self._master_target_time = new_target_time
+            self._tempo_ratio = max(self._MIN_TEMPO_RATIO, float(tempo_ratio))
+            self._tempo_history.append(self._tempo_ratio)
+            smoothed_ratio = float(np.mean(tuple(self._tempo_history), dtype=np.float64))
+            baseline = max(abs(self._playback_tempo_ratio), self._MIN_TEMPO_RATIO)
+            relative_change = abs(smoothed_ratio - self._playback_tempo_ratio) / baseline
+            if relative_change >= self._TEMPO_DEADZONE_RATIO:
+                self._playback_tempo_ratio = smoothed_ratio
 
-            if previous_index is None:
-                if new_target_time > self._BACKWARD_RESET_THRESHOLD:
-                    self._seek_request_time = new_target_time
+            if self._transport_paused:
                 return
 
-            backward_jump = (
-                previous_target_time is not None
-                and new_target_time < (previous_target_time - 1e-6)
-            )
-            forward_jump = (new_index - previous_index) >= self._FORWARD_SEEK_INDEX_THRESHOLD
-            if backward_jump or forward_jump:
+            if (
+                previous_index == new_index
+                and previous_target_time is not None
+                and abs(new_target_time - previous_target_time) <= 1e-6
+            ):
+                return
+
+            self._master_index = new_index
+            self._master_target_time = new_target_time
+            self._master_anchor_clock_time = new_anchor_clock_time
+            self._master_next_target_time = new_next_target_time
+
+            if previous_target_time is None:
+                self._seek_request_time = new_target_time
+                return
+
+            if abs(new_target_time - previous_target_time) > self._SEEK_TIME_THRESHOLD:
                 self._seek_request_time = new_target_time
 
     def _open_output(self) -> None:
         if self._injected_output is not None:
             self._output = self._injected_output
             self.status_label = "Injected MIDI output"
+            self._apply_master_output_level()
+            self._apply_program_state_at(0.0)
             return
 
         if not pygame.midi.get_init():
@@ -532,16 +701,25 @@ class DynamicOrchestraPlayer:
         if output_id < 0:
             raise RuntimeError("No MIDI output device found. Create a virtual MIDI synth/output first.")
         self._output = pygame.midi.Output(output_id, latency=0)
+        self._resolved_midi_output_id = int(output_id)
         self.status_label = f"Real MIDI output #{output_id}"
+        self._apply_master_output_level()
+        self._apply_program_state_at(0.0)
 
     def _resolve_output_id(self) -> int:
         requested_output_id = self._requested_midi_output_id
         if requested_output_id >= 0:
             info = pygame.midi.get_device_info(requested_output_id)
             if info is None:
-                raise RuntimeError(f"MIDI output device {requested_output_id} does not exist.")
+                raise RuntimeError(
+                    f"MIDI output device {requested_output_id} does not exist.\n"
+                    f"Available MIDI output devices:\n{describe_available_midi_output_devices()}"
+                )
             if not bool(info[3]):
-                raise RuntimeError(f"MIDI device {requested_output_id} is not an output port.")
+                raise RuntimeError(
+                    f"MIDI device {requested_output_id} is not an output port.\n"
+                    f"Available MIDI output devices:\n{describe_available_midi_output_devices()}"
+                )
             return requested_output_id
 
         output_id = pygame.midi.get_default_output_id()
@@ -561,49 +739,62 @@ class DynamicOrchestraPlayer:
     def _play_loop(self) -> None:
         try:
             while not self._stop_event.is_set():
-                now = self._clock()
-                self._flush_due_note_offs(now)
-
                 with self._tempo_lock:
                     master_target_time = self._master_target_time
-                    tempo_ratio = max(self._MIN_TEMPO_RATIO, self._tempo_ratio)
+                    master_playhead_time = self._projected_master_time_locked()
+                    tempo_ratio = max(self._MIN_TEMPO_RATIO, self._playback_tempo_ratio)
                     seek_target_time = self._seek_request_time
                     self._seek_request_time = None
+                    transport_paused = self._transport_paused
+                    transport_generation = self._transport_generation
 
                 if seek_target_time is not None:
                     self.seek(seek_target_time, tempo_ratio=tempo_ratio, log_reset=True)
+                    continue
+
+                if transport_paused:
+                    if not self._sleep_until(self._clock() + self._WAIT_GRANULARITY, transport_generation):
+                        if self._stop_event.is_set():
+                            return
+                        continue
                     continue
 
                 if master_target_time is not None and self._should_rewind_for_backward_jump(master_target_time):
                     self.seek(master_target_time, tempo_ratio=tempo_ratio, log_reset=True)
                     continue
 
-                if master_target_time is None:
-                    if self._sleep_with_note_offs(self._sleep_deadline(now)):
-                        return
+                if master_playhead_time is None:
+                    if not self._sleep_until(self._clock() + self._WAIT_GRANULARITY, transport_generation):
+                        if self._stop_event.is_set():
+                            return
+                        continue
                     continue
 
                 if self._event_index >= len(self._scheduled_events):
-                    if self._sleep_with_note_offs(self._sleep_deadline(now)):
-                        return
+                    if not self._sleep_until(self._clock() + self._WAIT_GRANULARITY, transport_generation):
+                        if self._stop_event.is_set():
+                            return
+                        continue
                     continue
 
                 event = self._scheduled_events[self._event_index]
-                if event.source_time > master_target_time:
-                    if self._sleep_with_note_offs(self._sleep_deadline(now)):
-                        return
+                if event.source_time > master_playhead_time:
+                    if not self._sleep_until(self._clock() + self._WAIT_GRANULARITY, transport_generation):
+                        if self._stop_event.is_set():
+                            return
+                        continue
                     continue
 
-                if not self._wait_inter_event_gap(event, tempo_ratio):
-                    return
+                if not self._wait_inter_event_gap(event, tempo_ratio, transport_generation):
+                    if self._stop_event.is_set():
+                        return
+                    continue
                 self._emit_event(event, tempo_ratio)
                 self._last_orchestra_time = event.source_time
                 self._last_emitted_source_time = event.source_time
                 self._last_emit_wall_time = self._clock()
                 self._event_index += 1
         finally:
-            self._flush_due_note_offs(float("inf"))
-            self._panic_all_notes_off()
             with self._lock:
                 if self._thread is threading.current_thread():
                     self._thread = None
@@ -618,19 +809,21 @@ class DynamicOrchestraPlayer:
         target_time = max(0.0, float(target_time))
         if tempo_ratio is None:
             with self._tempo_lock:
-                tempo_ratio = self._tempo_ratio
+                tempo_ratio = self._playback_tempo_ratio
         tempo_ratio = max(self._MIN_TEMPO_RATIO, float(tempo_ratio))
 
         if log_reset:
             self._logger.info("Seeking orchestra to %.3fs", target_time)
 
         self.panic()
+        self._apply_master_output_level()
+        self._apply_program_state_at(target_time)
         self._event_index = int(np.searchsorted(self._source_times, target_time, side="left"))
         self._last_orchestra_time = target_time
         self._last_emitted_source_time = None
         self._last_emit_wall_time = None
 
-        now = self._clock()
+        now = self._wall_clock()
         for event in self._scheduled_events:
             if event.note_duration is None:
                 continue
@@ -642,26 +835,27 @@ class DynamicOrchestraPlayer:
 
             midi_channel = int(getattr(event.message, "channel", 0))
             midi_note = int(getattr(event.message, "note", 0))
-            note_key = (midi_channel, midi_note)
+            output_channel = self._message_output_channel(midi_channel)
+            note_key = self._note_identity_key(midi_channel, output_channel, midi_note)
             note_generation = self._prepare_note_on(note_key)
             self._send_midi_message(event.message)
 
             remaining_duration = max(0.0, note_end_time - target_time)
-            note_off = ScheduledNoteOff(
-                due_time=now + (remaining_duration / tempo_ratio),
-                order=self._note_off_counter,
-                channel=midi_channel,
+            self._schedule_note_off(
+                note_key=note_key,
+                channel=output_channel,
                 note=midi_note,
                 generation=note_generation,
+                midi_duration=remaining_duration,
+                tempo_ratio=tempo_ratio,
+                now=now,
             )
-            self._note_off_counter += 1
-            with self._pending_note_offs_lock:
-                heapq.heappush(self._pending_note_offs, note_off)
 
     def _wait_inter_event_gap(
         self,
         event: TimedPlaybackEvent,
         tempo_ratio: float,
+        transport_generation: int,
     ) -> bool:
         if self._last_emitted_source_time is None or self._last_emit_wall_time is None:
             return True
@@ -670,21 +864,17 @@ class DynamicOrchestraPlayer:
         if source_gap <= 1e-6:
             return True
 
-        if source_gap > self._MAX_INTER_EVENT_GAP:
-            return True
-
         sleep_for = source_gap / tempo_ratio
         if sleep_for <= 1e-4:
             return True
         deadline = self._last_emit_wall_time + sleep_for
-        return not self._sleep_with_note_offs(deadline)
+        return self._sleep_until(deadline, transport_generation)
 
     def _emit_event(self, event: TimedPlaybackEvent, tempo_ratio: float) -> None:
-        self._flush_due_note_offs(self._clock())
-
         midi_channel = int(getattr(event.message, "channel", 0))
         midi_note = int(getattr(event.message, "note", 0))
-        note_key = (midi_channel, midi_note)
+        output_channel = self._message_output_channel(midi_channel)
+        note_key = self._note_identity_key(midi_channel, output_channel, midi_note)
         note_generation: int | None = None
 
         if event.message.type == "note_on" and int(getattr(event.message, "velocity", 0)) > 0:
@@ -694,50 +884,166 @@ class DynamicOrchestraPlayer:
         if event.note_duration is None:
             return
 
-        note_duration = max(0.0, float(event.note_duration))
-        due_time = self._clock() + (note_duration / tempo_ratio)
-        note_off = ScheduledNoteOff(
-            due_time=due_time,
-            order=self._note_off_counter,
-            channel=midi_channel,
+        if note_generation is None:
+            return
+        self._schedule_note_off(
+            note_key=note_key,
+            channel=output_channel,
             note=midi_note,
-            generation=int(note_generation if note_generation is not None else -1),
+            generation=note_generation,
+            midi_duration=max(0.0, float(event.note_duration)),
+            tempo_ratio=tempo_ratio,
         )
-        self._note_off_counter += 1
-        with self._pending_note_offs_lock:
-            heapq.heappush(self._pending_note_offs, note_off)
 
-    def _send_midi_message(self, message: mido.Message) -> None:
+    def _send_midi_message(self, message: mido.Message) -> bool:
         assert self._output is not None
+
+        if self._should_suppress_merged_channel_message(message):
+            return False
 
         if message.type == "sysex":
             payload = bytes(message.bytes())
-            self._output.write_sys_ex(pygame.midi.time(), payload)
-            return
+            with self._output_lock:
+                self._output.write_sys_ex(pygame.midi.time(), payload)
+            return True
 
         data = list(message.bytes())
         while len(data) < 3:
             data.append(0)
-        self._output.write_short(data[0], data[1], data[2])
+        if message.type == "note_on" and int(getattr(message, "velocity", 0)) > 0:
+            data[2] = int(
+                np.clip(
+                    round(127 * apply_orchestra_mix_level(data[2] / 127.0, self._volume_scale)),
+                    1,
+                    127,
+                )
+            )
+        elif message.type == "control_change" and int(getattr(message, "control", -1)) in {
+            ORCHESTRA_VOLUME_CC,
+            ORCHESTRA_EXPRESSION_CC,
+        }:
+            data[2] = int(
+                np.clip(
+                    round(127 * apply_orchestra_mix_level(data[2] / 127.0, self._volume_scale)),
+                    0,
+                    127,
+                )
+            )
+        if self._forced_output_channel is not None and 0x80 <= data[0] <= 0xEF:
+            data[0] = (data[0] & 0xF0) | self._forced_output_channel
+        with self._output_lock:
+            self._output.write_short(data[0], data[1], data[2])
+        return True
 
     def _send_note_off(self, channel: int, note: int) -> None:
         assert self._output is not None
-        self._output.write_short(0x80 | int(channel), int(note), 0)
+        with self._output_lock:
+            self._output.write_short(0x80 | int(channel), int(note), 0)
 
-    def _panic_all_notes_off(self) -> None:
+    def _send_program_change(self, channel: int, program: int) -> None:
+        assert self._output is not None
+        with self._output_lock:
+            self._output.write_short(0xC0 | int(channel), int(program), 0)
+
+    def _apply_master_output_level(self) -> None:
         if self._output is None:
             return
-        for channel in range(16):
-            self._output.write_short(0xB0 | channel, 121, 0)
-            self._output.write_short(0xB0 | channel, 123, 0)
-        with self._pending_note_offs_lock:
-            self._pending_note_offs.clear()
-            self._active_note_generations.clear()
+        expression_value = int(np.clip(round(127 * min(self._volume_scale, 1.0)), 0, 127))
+        channels = self._target_program_channels()
+        if not channels:
+            return
+        with self._output_lock:
+            for channel in channels:
+                self._output.write_short(
+                    0xB0 | int(channel),
+                    ORCHESTRA_VOLUME_CC,
+                    127,
+                )
+                self._output.write_short(
+                    0xB0 | int(channel),
+                    ORCHESTRA_EXPRESSION_CC,
+                    expression_value,
+                )
+                if self._forced_output_channel is None:
+                    continue
+                # Merged practice playback uses one synth channel, so make
+                # its spatial state deterministic instead of inheriting stale
+                # pan/reverb/chorus from the external host.
+                self._output.write_short(
+                    0xB0 | int(channel),
+                    ORCHESTRA_PAN_CC,
+                    64,
+                )
+                self._output.write_short(
+                    0xB0 | int(channel),
+                    ORCHESTRA_REVERB_CC,
+                    0,
+                )
+                self._output.write_short(
+                    0xB0 | int(channel),
+                    ORCHESTRA_CHORUS_CC,
+                    0,
+                )
+
+    def _apply_program_state_at(self, target_time: float) -> None:
+        if self._output is None:
+            return
+
+        channels = self._target_program_channels()
+        if not channels:
+            return
+
+        if self._force_instrument is not None:
+            for channel in channels:
+                self._send_program_change(channel, self._force_instrument)
+            return
+
+        if self._forced_output_channel is not None:
+            return
+
+        for channel in channels:
+            program = self._latest_program_for_channel(channel, target_time)
+            if program is not None:
+                self._send_program_change(channel, program)
+
+    def _send_all_notes_off(self) -> None:
+        if self._output is None:
+            return
+        channels = (
+            [self._forced_output_channel]
+            if self._forced_output_channel is not None
+            else list(range(16))
+        )
+        for channel in channels:
+            with self._output_lock:
+                self._output.write_short(0xB0 | channel, 64, 0)
+                self._output.write_short(0xB0 | channel, 66, 0)
+                self._output.write_short(0xB0 | channel, 67, 0)
+                self._output.write_short(0xB0 | channel, 120, 0)
+                self._output.write_short(0xB0 | channel, 121, 0)
+                self._output.write_short(0xB0 | channel, 123, 0)
+
+    def _send_brute_force_note_offs(self) -> None:
+        if self._output is None:
+            return
+        channels = (
+            [self._forced_output_channel]
+            if self._forced_output_channel is not None
+            else list(range(16))
+        )
+        for channel in channels:
+            for note in range(128):
+                self._send_note_off(channel, note)
+
+    def _send_full_panic(self) -> None:
+        self._send_all_notes_off()
+        self._send_brute_force_note_offs()
+        self._send_all_notes_off()
 
     def _should_rewind_for_backward_jump(self, master_target_time: float) -> bool:
         if self._last_orchestra_time is None:
             return False
-        return float(master_target_time) < (self._last_orchestra_time - self._BACKWARD_RESET_THRESHOLD)
+        return float(master_target_time) < (self._last_orchestra_time - self._SEEK_TIME_THRESHOLD)
 
     def _load_scheduled_events(self) -> list[TimedPlaybackEvent]:
         midi_file = mido.MidiFile(self._midi_path)
@@ -747,6 +1053,18 @@ class DynamicOrchestraPlayer:
         for message in midi_file:
             absolute_time += float(getattr(message, "time", 0.0))
             if getattr(message, "is_meta", False):
+                continue
+
+            source_channel = getattr(message, "channel", None)
+            if source_channel is not None:
+                output_channel = self._message_output_channel(int(source_channel))
+                self._observed_output_channels.add(output_channel)
+                if message.type == "program_change" and self._force_instrument is None:
+                    self._program_history_by_output_channel.setdefault(output_channel, []).append(
+                        (absolute_time, int(getattr(message, "program", 0)))
+                    )
+
+            if self._should_suppress_merged_channel_message(message):
                 continue
 
             if message.type == "note_on" and int(getattr(message, "velocity", 0)) > 0:
@@ -775,13 +1093,100 @@ class DynamicOrchestraPlayer:
         for note_stack in open_notes.values():
             for onset_event in note_stack:
                 onset_event.note_duration = max(0.0, absolute_time - onset_event.source_time)
+        if self._forced_output_channel is not None:
+            return self._merge_forced_channel_note_events(scheduled)
         return scheduled
+
+    def _merge_forced_channel_note_events(
+        self,
+        scheduled: list[TimedPlaybackEvent],
+    ) -> list[TimedPlaybackEvent]:
+        note_events: list[TimedPlaybackEvent] = []
+        passthrough: list[TimedPlaybackEvent] = []
+        for event in scheduled:
+            message = event.message
+            if (
+                message.type == "note_on"
+                and int(getattr(message, "velocity", 0)) > 0
+                and event.note_duration is not None
+            ):
+                note_events.append(event)
+            else:
+                passthrough.append(event)
+
+        by_note: dict[int, list[TimedPlaybackEvent]] = {}
+        for event in note_events:
+            by_note.setdefault(int(getattr(event.message, "note", 0)), []).append(event)
+
+        merged: list[TimedPlaybackEvent] = list(passthrough)
+        for note, events in by_note.items():
+            events.sort(key=lambda event: (event.source_time, event.source_time + float(event.note_duration or 0.0)))
+            current_start: float | None = None
+            current_end: float | None = None
+            current_velocity = 0
+
+            for event in events:
+                start = float(event.source_time)
+                end = start + max(0.0, float(event.note_duration or 0.0))
+                velocity = int(getattr(event.message, "velocity", 0))
+                if current_start is None:
+                    current_start = start
+                    current_end = max(start, end)
+                    current_velocity = velocity
+                    continue
+
+                assert current_end is not None
+                if start <= current_end + 1e-6:
+                    current_end = max(current_end, end)
+                    current_velocity = max(current_velocity, velocity)
+                    continue
+
+                merged.append(
+                    TimedPlaybackEvent(
+                        source_time=current_start,
+                        message=mido.Message(
+                            "note_on",
+                            channel=int(self._forced_output_channel),
+                            note=int(note),
+                            velocity=int(max(1, min(127, current_velocity))),
+                            time=0,
+                        ),
+                        note_duration=max(0.0, current_end - current_start),
+                    )
+                )
+                current_start = start
+                current_end = max(start, end)
+                current_velocity = velocity
+
+            if current_start is not None and current_end is not None:
+                merged.append(
+                    TimedPlaybackEvent(
+                        source_time=current_start,
+                        message=mido.Message(
+                            "note_on",
+                            channel=int(self._forced_output_channel),
+                            note=int(note),
+                            velocity=int(max(1, min(127, current_velocity))),
+                            time=0,
+                        ),
+                        note_duration=max(0.0, current_end - current_start),
+                    )
+                )
+
+        merged.sort(key=lambda event: event.source_time)
+        return merged
 
     def _initial_master_target_time(self) -> float | None:
         current_index = self._dispatcher.current_index
         if current_index is None:
             return None
         return self._score_index_to_target_time(int(current_index))
+
+    def _initial_master_next_target_time(self) -> float | None:
+        current_index = self._dispatcher.current_index
+        if current_index is None:
+            return None
+        return self._score_index_to_next_target_time(int(current_index))
 
     def _score_index_to_target_time(self, score_index: int) -> float:
         tempo_tracker = self._dispatcher.tempo_tracker
@@ -791,71 +1196,180 @@ class DynamicOrchestraPlayer:
             raise ValueError(f"Unknown score index for orchestra sync: {score_index}") from exc
         return float(tempo_tracker.nominal_onsets[position])
 
-    def _flush_due_note_offs(self, now: float) -> None:
-        due_notes: list[ScheduledNoteOff] = []
-        with self._pending_note_offs_lock:
-            while self._pending_note_offs and self._pending_note_offs[0].due_time <= now:
-                scheduled_note_off = heapq.heappop(self._pending_note_offs)
-                note_key = (scheduled_note_off.channel, scheduled_note_off.note)
-                active_generation = self._active_note_generations.get(note_key)
-                if active_generation != scheduled_note_off.generation:
-                    continue
-                self._active_note_generations.pop(note_key, None)
-                due_notes.append(scheduled_note_off)
+    def _score_index_to_next_target_time(self, score_index: int) -> float | None:
+        tempo_tracker = self._dispatcher.tempo_tracker
+        try:
+            position = int(tempo_tracker.index_to_position[int(score_index)])
+        except KeyError as exc:
+            raise ValueError(f"Unknown score index for orchestra sync: {score_index}") from exc
 
-        for scheduled_note_off in due_notes:
-            self._send_note_off(scheduled_note_off.channel, scheduled_note_off.note)
+        next_position = position + 1
+        if next_position >= len(tempo_tracker.nominal_onsets):
+            return None
+        return float(tempo_tracker.nominal_onsets[next_position])
 
-    def _has_pending_note_offs(self) -> bool:
-        with self._pending_note_offs_lock:
-            return bool(self._pending_note_offs)
+    def _projected_master_time_locked(self) -> float | None:
+        if self._master_target_time is None:
+            return None
 
-    def _next_note_off_due_time(self) -> float | None:
-        with self._pending_note_offs_lock:
-            if not self._pending_note_offs:
-                return None
-            return float(self._pending_note_offs[0].due_time)
+        target_time = float(self._master_target_time)
+        anchor_clock_time = self._master_anchor_clock_time
+        if anchor_clock_time is None:
+            return target_time
 
-    def _sleep_deadline(self, now: float) -> float:
-        next_note_off_due_time = self._next_note_off_due_time()
-        if next_note_off_due_time is None:
-            return now + self._WAIT_GRANULARITY
-        return min(now + self._WAIT_GRANULARITY, next_note_off_due_time)
+        elapsed = max(0.0, float(self._clock() - anchor_clock_time))
+        projected_time = target_time + (elapsed * max(self._MIN_TEMPO_RATIO, self._playback_tempo_ratio))
+        # Keep orchestra transport advancing by MIDI time between score updates.
+        # This preserves note tails and continuing accompaniment phrases when the
+        # soloist pauses, while future score callbacks can still seek/correct.
+        return max(target_time, projected_time)
 
-    def _sleep_with_note_offs(self, deadline: float) -> bool:
+    def _sleep_until(self, deadline: float, transport_generation: int) -> bool:
         while True:
             if self._stop_event.is_set():
-                return True
-
-            now = self._clock()
-            self._flush_due_note_offs(now)
-            if now >= deadline:
                 return False
 
-            next_note_off_due_time = self._next_note_off_due_time()
-            wake_time = deadline
-            if next_note_off_due_time is not None:
-                wake_time = min(wake_time, next_note_off_due_time)
-            wait_for = max(0.0, min(wake_time - now, self._WAIT_GRANULARITY))
+            now = self._clock()
+            if now >= deadline:
+                return True
+
+            with self._tempo_lock:
+                if self._transport_generation != transport_generation:
+                    return False
+                if self._transport_paused:
+                    return False
+                if self._seek_request_time is not None:
+                    return True
+                master_target_time = self._master_target_time
+            if master_target_time is not None and self._should_rewind_for_backward_jump(master_target_time):
+                return True
+
+            wait_for = max(0.0, min(deadline - now, self._WAIT_GRANULARITY))
             if wait_for <= 1e-4:
                 continue
             if self._stop_event.wait(wait_for):
-                return True
+                return False
 
-    def _prepare_note_on(self, note_key: tuple[int, int]) -> int:
-        channel, note = note_key
+    def _note_off_loop(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                due_notes: list[ScheduledNoteOff] = []
+                with self._note_off_condition:
+                    while not self._stop_event.is_set():
+                        now = self._wall_clock()
+                        while self._pending_note_offs and self._pending_note_offs[0].due_time <= now:
+                            scheduled_note_off = heapq.heappop(self._pending_note_offs)
+                            active_generation = self._active_note_generations.get(
+                                scheduled_note_off.note_key
+                            )
+                            if active_generation != scheduled_note_off.generation:
+                                continue
+                            self._active_note_generations.pop(scheduled_note_off.note_key, None)
+                            due_notes.append(scheduled_note_off)
+
+                        if due_notes:
+                            break
+
+                        if not self._pending_note_offs:
+                            self._note_off_condition.wait(timeout=self._WAIT_GRANULARITY)
+                            continue
+
+                        next_due_time = float(self._pending_note_offs[0].due_time)
+                        wait_for = max(0.0, min(next_due_time - now, self._WAIT_GRANULARITY))
+                        self._note_off_condition.wait(timeout=wait_for)
+
+                for scheduled_note_off in due_notes:
+                    self._send_note_off(scheduled_note_off.channel, scheduled_note_off.note)
+        finally:
+            with self._lock:
+                if self._note_off_thread is threading.current_thread():
+                    self._note_off_thread = None
+
+    def _schedule_note_off(
+        self,
+        *,
+        note_key: tuple[int, int, int],
+        channel: int,
+        note: int,
+        generation: int,
+        midi_duration: float,
+        tempo_ratio: float,
+        now: float | None = None,
+    ) -> None:
+        with self._note_off_condition:
+            note_off = ScheduledNoteOff(
+                due_time=(self._wall_clock() if now is None else now)
+                + (max(0.0, float(midi_duration)) / max(self._MIN_TEMPO_RATIO, float(tempo_ratio))),
+                order=self._note_off_counter,
+                channel=int(channel),
+                note=int(note),
+                generation=int(generation),
+                note_key=note_key,
+            )
+            self._note_off_counter += 1
+            heapq.heappush(self._pending_note_offs, note_off)
+            self._note_off_condition.notify()
+
+    def _should_suppress_merged_channel_message(self, message: mido.Message) -> bool:
+        if self._forced_output_channel is not None and message.type not in {"note_on", "note_off"}:
+            return True
+
+        if message.type == "program_change":
+            return self._force_instrument is not None or self._forced_output_channel is not None
+
+        if self._forced_output_channel is None:
+            return False
+
+        if message.type == "control_change":
+            return int(getattr(message, "control", -1)) in self._MERGED_CHANNEL_FILTERED_CONTROLS
+
+        return False
+
+    def _message_output_channel(self, source_channel: int) -> int:
+        if self._forced_output_channel is not None:
+            return int(self._forced_output_channel)
+        return int(max(0, min(15, int(source_channel) + self._channel_offset)))
+
+    def _note_identity_key(
+        self,
+        source_channel: int,
+        output_channel: int,
+        note: int,
+    ) -> tuple[int, int, int]:
+        return (int(source_channel), int(output_channel), int(note))
+
+    def _prepare_note_on(self, note_key: tuple[int, int, int]) -> int:
+        _, output_channel, note = note_key
         send_dedup_note_off = False
-        with self._pending_note_offs_lock:
+        with self._note_off_condition:
             if note_key in self._active_note_generations:
                 send_dedup_note_off = True
             generation = self._note_generation_counter
             self._note_generation_counter += 1
             self._active_note_generations[note_key] = generation
+            self._note_off_condition.notify()
 
         if send_dedup_note_off:
-            self._send_note_off(channel, note)
+            self._send_note_off(output_channel, note)
 
         return generation
+
+    def _target_program_channels(self) -> list[int]:
+        if self._forced_output_channel is not None:
+            return [int(self._forced_output_channel)]
+        return sorted(self._observed_output_channels)
+
+    def _latest_program_for_channel(self, channel: int, target_time: float) -> int | None:
+        history = self._program_history_by_output_channel.get(int(channel))
+        if not history:
+            return None
+
+        latest_program: int | None = None
+        for event_time, program in history:
+            if event_time > target_time:
+                break
+            latest_program = int(program)
+        return latest_program
 
 
 def main() -> int:
@@ -887,6 +1401,7 @@ def main() -> int:
             orchestra_midi_path,
             dispatcher,
             midi_output_id=args.midi_out,
+            force_instrument=args.force_instrument,
         )
         emulator = ScaledMidiEmulator(solo_midi_path, speed=args.human_speed)
         last_logged_index = -1

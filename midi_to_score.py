@@ -138,23 +138,30 @@ def select_cluster_events(cluster: list[NoteEvent], chord_policy: str) -> list[N
     return [min(cluster, key=lambda event: event.order)]
 
 
-def note_duration(
-    note_event: NoteEvent,
+def cluster_onset_time(cluster: list[NoteEvent]) -> float:
+    return min(float(event.start_time) for event in cluster)
+
+
+def cluster_state_duration(
+    cluster: list[NoteEvent],
     next_onset_time: float | None,
     *,
     default_duration: float,
     min_duration: float,
 ) -> float:
-    raw_duration: float | None = None
+    onset_time = cluster_onset_time(cluster)
+    if next_onset_time is not None and next_onset_time > onset_time:
+        return max(min_duration, float(next_onset_time - onset_time))
 
-    if note_event.end_time is not None and note_event.end_time > note_event.start_time:
-        raw_duration = note_event.end_time - note_event.start_time
-    elif next_onset_time is not None and next_onset_time > note_event.start_time:
-        raw_duration = next_onset_time - note_event.start_time
-    else:
-        raw_duration = default_duration
-
-    return max(min_duration, raw_duration)
+    latest_end_time = max(
+        (
+            float(event.end_time)
+            for event in cluster
+            if event.end_time is not None and event.end_time > onset_time
+        ),
+        default=onset_time + default_duration,
+    )
+    return max(min_duration, float(latest_end_time - onset_time))
 
 
 def convert_to_score(
@@ -175,25 +182,24 @@ def convert_to_score(
     for index, cluster in enumerate(onset_clusters):
         emitted_events = select_cluster_events(cluster, chord_policy)
         next_onset_time = (
-            onset_clusters[index + 1][0].start_time if index + 1 < len(onset_clusters) else None
+            cluster_onset_time(onset_clusters[index + 1])
+            if index + 1 < len(onset_clusters)
+            else None
         )
-        representative_event = min(emitted_events, key=lambda event: event.order)
+        onset_time = cluster_onset_time(emitted_events)
         pitches = sorted({int(event.pitch) for event in emitted_events})
-        duration = max(
-            note_duration(
-                event,
-                next_onset_time,
-                default_duration=default_duration,
-                min_duration=min_duration,
-            )
-            for event in emitted_events
+        duration = cluster_state_duration(
+            emitted_events,
+            next_onset_time,
+            default_duration=default_duration,
+            min_duration=min_duration,
         )
 
         notes.append(
             {
                 "index": len(notes),
                 "pitches": pitches,
-                "nominal_onset": round(representative_event.start_time, 6),
+                "nominal_onset": round(onset_time, 6),
                 "nominal_duration": round(duration, 6),
             }
         )

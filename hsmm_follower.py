@@ -90,9 +90,9 @@ class ScoreFollowerHSMM:
         self.last_best_pitch_distance = 0.0
         self._has_seen_event = False
 
-    def process_event(self, pitch: int | float, timestamp: float) -> int:
+    def process_event(self, pitch: Any, timestamp: float) -> int:
         """Consume one MIDI note event and return the most likely score index."""
-        observed_pitch = float(pitch)
+        observed_pitches = self._coerce_observed_pitches(pitch)
         event_time = float(timestamp)
 
         if self.last_timestamp is not None and event_time < self.last_timestamp:
@@ -101,7 +101,7 @@ class ScoreFollowerHSMM:
         if self.current_state_start_time is None:
             self.current_state_start_time = event_time
 
-        emission, pitch_distance = self._emission_probabilities(observed_pitch)
+        emission, pitch_distance = self._emission_probabilities(observed_pitches)
         best_matching_position = int(np.argmax(emission))
         best_pitch_distance = float(pitch_distance[best_matching_position])
         self.last_best_match_position = best_matching_position
@@ -257,10 +257,27 @@ class ScoreFollowerHSMM:
             raise ValueError("score note 'pitches' must be a non-empty list")
         return [float(pitch) for pitch in raw_pitches]
 
-    def _emission_probabilities(self, observed_pitch: float) -> tuple[np.ndarray, np.ndarray]:
-        pitch_delta = np.abs(observed_pitch - self.chord_pitch_matrix)
-        pitch_delta = np.where(np.isnan(self.chord_pitch_matrix), np.inf, pitch_delta)
-        pitch_distance = np.min(pitch_delta, axis=1)
+    @staticmethod
+    def _coerce_observed_pitches(pitch: Any) -> np.ndarray:
+        if isinstance(pitch, np.ndarray):
+            observed_pitches = np.asarray(pitch, dtype=np.float64).reshape(-1)
+        elif isinstance(pitch, (list, tuple, set)):
+            observed_pitches = np.asarray(list(pitch), dtype=np.float64).reshape(-1)
+        else:
+            observed_pitches = np.asarray([float(pitch)], dtype=np.float64)
+
+        if observed_pitches.size == 0:
+            raise ValueError("observed pitch collection must not be empty")
+
+        return observed_pitches
+
+    def _emission_probabilities(self, observed_pitches: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        pitch_delta = np.abs(
+            self.chord_pitch_matrix[:, :, None] - observed_pitches[None, None, :]
+        )
+        pitch_delta = np.where(np.isnan(self.chord_pitch_matrix[:, :, None]), np.inf, pitch_delta)
+        observed_to_state = np.min(pitch_delta, axis=1)
+        pitch_distance = np.min(observed_to_state, axis=1)
         pitch_delta = np.minimum(pitch_distance, self.outlier_pitch_clip)
         emission = np.exp(-(pitch_delta * pitch_delta) / (2.0 * self.sigma * self.sigma))
         return np.maximum(emission, self._TINY), pitch_distance

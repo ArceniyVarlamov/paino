@@ -726,7 +726,7 @@ def run_test_case(
     score: list[dict[str, int | float]],
 ) -> TestResult:
     case_score = case.score if case.score is not None else score
-    follower = HybridScoreFollower(case_score)
+    follower = HybridScoreFollower(case_score, load_tuning_profile=False)
     traces: list[EventTrace] = []
 
     try:

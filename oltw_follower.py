@@ -73,17 +73,20 @@ class ScoreFollowerOLTW:
         self.event_count = 0
         self._has_seen_event = False
 
-    def process_event(self, pitch: int | float, timestamp: float) -> int:
+    def process_event(self, pitch: Any, timestamp: float) -> int:
         """Consume one MIDI note event and return the predicted score index."""
-        observed_pitch = float(pitch)
+        observed_pitches = self._coerce_observed_pitches(pitch)
         event_time = float(timestamp)
 
         if self.last_timestamp is not None and event_time < self.last_timestamp:
             event_time = self.last_timestamp
 
-        pitch_delta = np.abs(self.chord_pitch_matrix - observed_pitch)
-        pitch_delta = np.where(np.isnan(self.chord_pitch_matrix), np.inf, pitch_delta)
-        local_costs = np.minimum(np.min(pitch_delta, axis=1), self.max_local_cost)
+        pitch_delta = np.abs(
+            self.chord_pitch_matrix[:, :, None] - observed_pitches[None, None, :]
+        )
+        pitch_delta = np.where(np.isnan(self.chord_pitch_matrix[:, :, None]), np.inf, pitch_delta)
+        observed_to_state = np.min(pitch_delta, axis=1)
+        local_costs = np.minimum(np.min(observed_to_state, axis=1), self.max_local_cost)
         curr_col = np.full(self.num_states + 1, np.inf, dtype=np.float64)
 
         for row in range(1, self.num_states + 1):
@@ -222,3 +225,17 @@ class ScoreFollowerOLTW:
         if not isinstance(raw_pitches, list) or not raw_pitches:
             raise ValueError("score note 'pitches' must be a non-empty list")
         return [float(pitch) for pitch in raw_pitches]
+
+    @staticmethod
+    def _coerce_observed_pitches(pitch: Any) -> np.ndarray:
+        if isinstance(pitch, np.ndarray):
+            observed_pitches = np.asarray(pitch, dtype=np.float64).reshape(-1)
+        elif isinstance(pitch, (list, tuple, set)):
+            observed_pitches = np.asarray(list(pitch), dtype=np.float64).reshape(-1)
+        else:
+            observed_pitches = np.asarray([float(pitch)], dtype=np.float64)
+
+        if observed_pitches.size == 0:
+            raise ValueError("observed pitch collection must not be empty")
+
+        return observed_pitches
