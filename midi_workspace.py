@@ -362,43 +362,50 @@ def prepare_source_bundle(
     )
 
 
+def _pick_midi_file_macos() -> Path:
+    try:
+        completed = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                (
+                    'POSIX path of (choose file with prompt "Select MIDI file to import" '
+                    'of type {"mid","midi"})'
+                ),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            "osascript was not found. Pass the MIDI path explicitly."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr_text = (exc.stderr or "").strip().lower()
+        if "user canceled" in stderr_text or "cancelled" in stderr_text:
+            raise SystemExit("No MIDI file selected.") from exc
+        raise SystemExit(
+            "Failed to open the macOS file picker. Pass the MIDI path explicitly."
+        ) from exc
+
+    selected_path = completed.stdout.strip()
+    if not selected_path:
+        raise SystemExit("No MIDI file selected.")
+    return Path(selected_path).expanduser().resolve()
+
+
 def pick_midi_file() -> Path:
+    # On recent macOS builds, tkinter file dialogs can crash due to the OS
+    # version bridge reporting 16.x to older GUI runtimes. Use the native
+    # AppleScript picker instead of importing tkinter there.
+    if sys.platform == "darwin":
+        return _pick_midi_file_macos()
+
     try:
         import tkinter as tk
         from tkinter import filedialog
     except ModuleNotFoundError as exc:
-        if sys.platform == "darwin":
-            try:
-                completed = subprocess.run(
-                    [
-                        "osascript",
-                        "-e",
-                        (
-                            'POSIX path of (choose file with prompt "Select MIDI file to import" '
-                            'of type {"mid","midi"})'
-                        ),
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except FileNotFoundError:
-                raise SystemExit(
-                    "tkinter is unavailable and osascript was not found. Pass the MIDI path explicitly."
-                ) from exc
-            except subprocess.CalledProcessError as picker_exc:
-                stderr_text = (picker_exc.stderr or "").strip().lower()
-                if "user canceled" in stderr_text or "cancelled" in stderr_text:
-                    raise SystemExit("No MIDI file selected.") from picker_exc
-                raise SystemExit(
-                    "Failed to open the macOS file picker. Pass the MIDI path explicitly."
-                ) from picker_exc
-
-            selected_path = completed.stdout.strip()
-            if not selected_path:
-                raise SystemExit("No MIDI file selected.")
-            return Path(selected_path).expanduser().resolve()
-
         raise SystemExit(
             "tkinter is unavailable in this Python build. Pass the MIDI path explicitly."
         ) from exc
