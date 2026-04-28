@@ -13,6 +13,8 @@ if _VENDOR_DIR.exists():
 
 import numpy as np
 
+from compat import compat_zip
+
 from hybrid_fusion import HybridScoreFollower
 
 
@@ -95,14 +97,14 @@ def average_absolute_error(traces: list[EventTrace]) -> float:
 
 
 def first_backward_event(traces: list[EventTrace]) -> int | None:
-    for previous, current in zip(traces, traces[1:], strict=False):
+    for previous, current in compat_zip(traces, traces[1:]):
         if current.prediction < previous.prediction:
             return current.event_index
     return None
 
 
 def first_large_jump_event(traces: list[EventTrace], *, max_step: int) -> int | None:
-    for previous, current in zip(traces, traces[1:], strict=False):
+    for previous, current in compat_zip(traces, traces[1:]):
         if (current.prediction - previous.prediction) > max_step:
             return current.event_index
     return None

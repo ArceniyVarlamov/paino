@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Deque, Iterable
 
+from compat import compat_zip
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENDOR_DIR = PROJECT_ROOT / ".vendor"
 
@@ -503,8 +505,8 @@ def build_output_midi(
 
 
 def split_notes_by_assignment(notes: list[Note], assignments: list[int]) -> tuple[list[Note], list[Note]]:
-    left_notes = [note for note, hand in zip(notes, assignments, strict=True) if hand == LH]
-    right_notes = [note for note, hand in zip(notes, assignments, strict=True) if hand == RH]
+    left_notes = [note for note, hand in compat_zip(notes, assignments, strict=True) if hand == LH]
+    right_notes = [note for note, hand in compat_zip(notes, assignments, strict=True) if hand == RH]
     return left_notes, right_notes
 
 

@@ -14,6 +14,8 @@ if _VENDOR_DIR.exists():
 
 import mido
 
+from compat import compat_zip
+
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "generated_dataset"
 DEFAULT_TEMPO = 500000
 DEFAULT_TICKS_PER_BEAT = 480
@@ -130,7 +132,7 @@ def rubato_case() -> tuple[list[ScaleEvent], list[tuple[int, float]]]:
     expressive_durations = [0.7, 0.62, 0.48, 0.35, 0.28, 0.42, 0.56, 0.78]
     performance = [
         {"pitches": [pitch], "duration": duration}
-        for pitch, duration in zip(scale, expressive_durations, strict=True)
+        for pitch, duration in compat_zip(scale, expressive_durations, strict=True)
     ]
     score = [(pitch, nominal_duration) for pitch in scale]
     return performance, score

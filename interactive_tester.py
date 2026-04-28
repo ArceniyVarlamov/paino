@@ -22,6 +22,8 @@ if _VENDOR_DIR.exists():
 
 import numpy as np
 
+from compat import compat_zip
+
 try:
     import mido
     import pygame
@@ -874,7 +876,7 @@ def build_keyboard_map() -> tuple[dict[int, int], dict[int, str]]:
     keyboard_map: dict[int, int] = {}
     pitch_labels: dict[int, str] = {}
 
-    for label, pitch in zip(labels, white_pitches, strict=False):
+    for label, pitch in compat_zip(labels, white_pitches):
         key_code = KEY_LABEL_TO_CODE[label]
         keyboard_map[key_code] = pitch
         pitch_labels[pitch] = label
@@ -4047,7 +4049,7 @@ def main() -> int:
         else:
             durations = [max(0.05, float(nominal_duration)) for _ in midi_pitches]
 
-        for midi_pitch, duration in zip(midi_pitches, durations, strict=False):
+        for midi_pitch, duration in compat_zip(midi_pitches, durations):
             release_at = float(onset_time) + duration
             autoplay_pending_note_offs.append((release_at, int(midi_pitch)))
 
@@ -4363,7 +4365,7 @@ def main() -> int:
 
         velocity_by_pitch = {
             clamp_midi_pitch(pitch): int(max(1, min(127, velocity)))
-            for pitch, velocity in zip(midi_pitches, velocities or [], strict=False)
+            for pitch, velocity in compat_zip(midi_pitches, velocities or [])
         }
         for midi_pitch in normalized_pitches:
             play_note_sound(

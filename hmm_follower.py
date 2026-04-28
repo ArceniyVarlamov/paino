@@ -12,6 +12,8 @@ if _VENDOR_DIR.exists():
 
 import numpy as np
 
+from compat import compat_zip
+
 
 class ScoreFollowerHMM:
     """Realtime score-following with a duration-aware Forward update."""
@@ -187,7 +189,7 @@ if __name__ == "__main__":
     predictions = [follower.process_event(event) for event in performance]
     expected = list(range(follower.N))
 
-    for event, predicted_index in zip(performance, predictions, strict=True):
+    for event, predicted_index in compat_zip(performance, predictions, strict=True):
         score_pitch = int(follower.pitches[predicted_index])
         print(
             f"t={event['timestamp']:.3f}s pitch={int(event['pitch']):>3} "

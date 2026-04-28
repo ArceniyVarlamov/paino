@@ -13,6 +13,7 @@ if _VENDOR_DIR.exists():
 
 import numpy as np
 
+from compat import compat_zip
 from hsmm_follower import ScoreFollowerHSMM
 from oltw_follower import ScoreFollowerOLTW
 
@@ -852,7 +853,7 @@ class HybridScoreFollower:
             neighbor_weights = np.asarray([0.65, 0.35], dtype=np.float64)
             neighbor_weights /= neighbor_weights.sum()
 
-            for offset, weight in zip(neighbor_offsets, neighbor_weights, strict=True):
+            for offset, weight in compat_zip(neighbor_offsets, neighbor_weights, strict=True):
                 position = target_position + offset
                 if 0 <= position < self.hsmm.N:
                     alpha[position] += residual_mass * float(weight)
