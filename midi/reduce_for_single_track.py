@@ -10,7 +10,7 @@ _VENDOR_DIR = Path(__file__).resolve().parents[1] / ".vendor"
 if _VENDOR_DIR.exists():
     vendor_path = str(_VENDOR_DIR)
     if vendor_path not in sys.path:
-        sys.path.insert(0, vendor_path)
+        sys.path.append(vendor_path)
 
 import mido
 

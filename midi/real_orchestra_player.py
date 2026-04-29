@@ -22,7 +22,7 @@ VENDOR_DIR = PROJECT_ROOT / ".vendor"
 for candidate in (PROJECT_ROOT, VENDOR_DIR):
     candidate_str = str(candidate)
     if candidate.exists() and candidate_str not in sys.path:
-        sys.path.insert(0, candidate_str)
+        sys.path.append(candidate_str)
 
 try:
     import mido
