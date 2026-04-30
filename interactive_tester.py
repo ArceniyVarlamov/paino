@@ -2698,6 +2698,8 @@ def autoplay_cache_pitches(
 def build_workspace_import_namespace() -> argparse.Namespace:
     return argparse.Namespace(
         midi_file=None,
+        orchestra_midi_file=None,
+        require_orchestra=False,
         library_root=WORKSPACE_DEFAULT_LIBRARY_ROOT,
         title=None,
         skip_study_mode=False,
@@ -2891,23 +2893,52 @@ def run_startup_launcher(*, setup_expected: bool) -> int:
                     os.execv(sys.executable, command)
                 if choose_midi_rect.collidepoint(event.pos):
                     try:
-                        selected_midi = pick_midi_file()
+                        selected_midi = pick_midi_file(
+                            prompt=(
+                                "Select piano MIDI file to import"
+                                if selected_mode == "orchestra"
+                                else "Select MIDI file to import"
+                            )
+                        )
                     except SystemExit as exc:
                         error_text = str(exc).strip()
                         if error_text and error_text != "No MIDI file selected.":
                             error_message = error_text
                         continue
 
+                    selected_orchestra_midi: Path | None = None
+                    if selected_mode == "orchestra":
+                        try:
+                            selected_orchestra_midi = pick_midi_file(
+                                prompt="Select orchestra MIDI file to import"
+                            )
+                        except SystemExit as exc:
+                            error_text = str(exc).strip()
+                            if not error_text or error_text == "No MIDI file selected.":
+                                error_message = "Orchestra MIDI is required for Orchestra / Full Score import."
+                            else:
+                                error_message = error_text
+                            continue
+
                     processing = True
-                    status_message = "Importing MIDI and preparing the workspace. This can take some time."
+                    status_message = (
+                        "Importing piano and orchestra MIDI files and preparing the workspace. "
+                        "This can take some time."
+                        if selected_mode == "orchestra"
+                        else "Importing MIDI and preparing the workspace. This can take some time."
+                    )
                     processing_stage = "Loading MIDI"
-                    processing_log = [f"Selected {selected_midi.name}"]
+                    processing_log = [f"Selected piano MIDI: {selected_midi.name}"]
+                    if selected_orchestra_midi is not None:
+                        processing_log.append(f"Selected orchestra MIDI: {selected_orchestra_midi.name}")
                     processing_started_at = time.time()
                     error_message = None
                     pending_launch_command = None
 
                     workspace_args = build_workspace_import_namespace()
                     workspace_args.midi_file = selected_midi
+                    workspace_args.orchestra_midi_file = selected_orchestra_midi
+                    workspace_args.require_orchestra = selected_mode == "orchestra"
 
                     def progress_callback(stage: str, detail: str) -> None:
                         worker_queue.put(("progress", (stage, detail)))
@@ -2972,7 +3003,7 @@ def run_startup_launcher(*, setup_expected: bool) -> int:
             draw_fitted_text(
                 screen,
                 fonts["body"],
-                "Load a MIDI file, preprocess it, run first-time MIDI setup if needed, and open the tester.",
+                "Load the source MIDI, preprocess it, run first-time MIDI setup if needed, and open the tester.",
                 TEXT_COLOR,
                 (84, 126),
                 980,
@@ -2982,7 +3013,7 @@ def run_startup_launcher(*, setup_expected: bool) -> int:
             draw_mode_card(
                 orchestra_mode_rect,
                 "Orchestra / Full Score",
-                "Use full-score tracking for the imported piece. If a linked orchestra MIDI exists, or the file is a combined concerto MIDI, accompaniment will be attached automatically.",
+                "Import a piano MIDI together with a separate orchestra MIDI. The launcher now requires both files explicitly for this mode.",
                 active=selected_mode == "orchestra",
                 hovered=orchestra_mode_rect.collidepoint(mouse_pos),
             )
@@ -2997,7 +3028,7 @@ def run_startup_launcher(*, setup_expected: bool) -> int:
             draw_button(
                 screen,
                 choose_midi_rect,
-                "Load MIDI",
+                "Load MIDI Pair" if selected_mode == "orchestra" else "Load MIDI",
                 fonts["small"],
                 active=True,
                 hovered=choose_midi_rect.collidepoint(mouse_pos),

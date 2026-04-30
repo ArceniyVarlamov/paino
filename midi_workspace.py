@@ -77,6 +77,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Source MIDI file. If omitted, a native file picker will be opened.",
     )
     parser.add_argument(
+        "--orchestra-midi-file",
+        type=Path,
+        default=None,
+        help="Optional separate orchestra MIDI file to attach explicitly during import.",
+    )
+    parser.add_argument(
+        "--require-orchestra",
+        action="store_true",
+        help="Require orchestra accompaniment for the import instead of allowing piano-only input.",
+    )
+    parser.add_argument(
         "--library-root",
         type=Path,
         default=DEFAULT_LIBRARY_ROOT,
@@ -275,10 +286,37 @@ def prepare_source_bundle(
     selected_input_path: Path,
     workspace_dir: Path,
     warnings: list[str],
+    *,
+    orchestra_input_path: Path | None = None,
+    require_orchestra: bool = False,
 ) -> PreparedSourceBundle:
     source_dir = workspace_dir / "source"
     orchestra_dir = workspace_dir / "orchestra"
     source_dir.mkdir(parents=True, exist_ok=True)
+
+    if orchestra_input_path is not None:
+        resolved_orchestra_input = orchestra_input_path.expanduser().resolve()
+        if resolved_orchestra_input == selected_input_path.resolve():
+            raise ValueError("Piano MIDI and orchestra MIDI must be different files.")
+
+        imported_midi_path = source_dir / f"source{selected_input_path.suffix.lower()}"
+        imported_json_path = imported_midi_path.with_suffix(".json")
+        shutil.copy2(selected_input_path, imported_midi_path)
+
+        orchestra_dir.mkdir(parents=True, exist_ok=True)
+        imported_orchestra_path = orchestra_dir / f"orchestra{resolved_orchestra_input.suffix.lower()}"
+        shutil.copy2(resolved_orchestra_input, imported_orchestra_path)
+        warnings.append("Attached the selected orchestra MIDI explicitly.")
+
+        return PreparedSourceBundle(
+            selected_input=selected_input_path.resolve(),
+            tracking_source_origin=selected_input_path.resolve(),
+            imported_midi_path=imported_midi_path,
+            imported_json_path=imported_json_path,
+            orchestra_midi_path=imported_orchestra_path,
+            orchestra_origin=resolved_orchestra_input,
+            orchestra_source_kind="explicit_pair",
+        )
 
     linked_pair = detect_linked_solo_orchestra_pair(selected_input_path)
     if linked_pair is not None:
@@ -351,6 +389,11 @@ def prepare_source_bundle(
             "This MIDI looks orchestral, but no piano track was detected automatically. Full-score import will follow the selected file directly."
         )
 
+    if require_orchestra:
+        raise ValueError(
+            "Orchestra import requires a separate orchestra MIDI file or a source that can be split automatically."
+        )
+
     return PreparedSourceBundle(
         selected_input=selected_input_path.resolve(),
         tracking_source_origin=selected_input_path.resolve(),
@@ -362,14 +405,15 @@ def prepare_source_bundle(
     )
 
 
-def _pick_midi_file_macos() -> Path:
+def _pick_midi_file_macos(prompt: str) -> Path:
     try:
+        quoted_prompt = json.dumps(str(prompt))
         completed = subprocess.run(
             [
                 "osascript",
                 "-e",
                 (
-                    'POSIX path of (choose file with prompt "Select MIDI file to import" '
+                    f"POSIX path of (choose file with prompt {quoted_prompt} "
                     'of type {"mid","midi"})'
                 ),
             ],
@@ -395,12 +439,12 @@ def _pick_midi_file_macos() -> Path:
     return Path(selected_path).expanduser().resolve()
 
 
-def pick_midi_file() -> Path:
+def pick_midi_file(*, prompt: str = "Select MIDI file to import") -> Path:
     # On recent macOS builds, tkinter file dialogs can crash due to the OS
     # version bridge reporting 16.x to older GUI runtimes. Use the native
     # AppleScript picker instead of importing tkinter there.
     if sys.platform == "darwin":
-        return _pick_midi_file_macos()
+        return _pick_midi_file_macos(prompt)
 
     try:
         import tkinter as tk
@@ -414,7 +458,7 @@ def pick_midi_file() -> Path:
     root.withdraw()
     root.update_idletasks()
     selected_path = filedialog.askopenfilename(
-        title="Select MIDI file to import",
+        title=str(prompt),
         filetypes=[("MIDI files", "*.mid *.midi"), ("All files", "*.*")],
     )
     root.destroy()
@@ -423,8 +467,12 @@ def pick_midi_file() -> Path:
     return Path(selected_path).expanduser().resolve()
 
 
-def resolve_input_midi(midi_file: Path | None) -> Path:
-    candidate = midi_file if midi_file is not None else pick_midi_file()
+def resolve_input_midi(
+    midi_file: Path | None,
+    *,
+    prompt: str = "Select MIDI file to import",
+) -> Path:
+    candidate = midi_file if midi_file is not None else pick_midi_file(prompt=prompt)
     resolved = candidate.expanduser().resolve()
     if resolved.suffix.lower() not in {".mid", ".midi"}:
         raise SystemExit(f"Unsupported MIDI input: {resolved}")
@@ -630,7 +678,18 @@ def import_piece_workspace_with_progress(
     *,
     progress_callback: ProgressCallback | None,
 ) -> dict[str, Any]:
-    selected_input_path = resolve_input_midi(args.midi_file)
+    selected_input_path = resolve_input_midi(
+        args.midi_file,
+        prompt="Select piano MIDI file to import",
+    )
+    orchestra_input_path = (
+        resolve_input_midi(
+            args.orchestra_midi_file,
+            prompt="Select orchestra MIDI file to import",
+        )
+        if getattr(args, "orchestra_midi_file", None) is not None
+        else None
+    )
     emit_progress(progress_callback, "Loading MIDI", f"Selected {selected_input_path.name}")
     library_root = args.library_root.expanduser().resolve()
     library_root.mkdir(parents=True, exist_ok=True)
@@ -642,7 +701,13 @@ def import_piece_workspace_with_progress(
     emit_progress(progress_callback, "Preparing Workspace", f"Workspace folder: {workspace_dir.name}")
 
     warnings: list[str] = []
-    source_bundle = prepare_source_bundle(selected_input_path, workspace_dir, warnings)
+    source_bundle = prepare_source_bundle(
+        selected_input_path,
+        workspace_dir,
+        warnings,
+        orchestra_input_path=orchestra_input_path,
+        require_orchestra=bool(getattr(args, "require_orchestra", False)),
+    )
     emit_progress(
         progress_callback,
         "Preparing Source Material",
