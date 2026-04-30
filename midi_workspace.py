@@ -440,6 +440,29 @@ def _pick_midi_file_macos(prompt: str) -> Path:
     return Path(selected_path).expanduser().resolve()
 
 
+def _pick_midi_file_zenity(prompt: str) -> Path:
+    import subprocess
+    try:
+        completed = subprocess.run(
+            [
+                "zenity",
+                "--file-selection",
+                f"--title={prompt}",
+                "--file-filter=MIDI files (*.mid *.midi) | *.mid *.midi",
+                "--file-filter=All files | *",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit("zenity is not available. Pass the MIDI path explicitly.") from exc
+    selected_path = completed.stdout.strip()
+    if not selected_path:
+        raise SystemExit("No MIDI file selected.")
+    return Path(selected_path).expanduser().resolve()
+
+
 def pick_midi_file(*, prompt: str = "Select MIDI file to import") -> Path:
     # On recent macOS builds, tkinter file dialogs can crash due to the OS
     # version bridge reporting 16.x to older GUI runtimes. Use the native
@@ -447,25 +470,9 @@ def pick_midi_file(*, prompt: str = "Select MIDI file to import") -> Path:
     if sys.platform == "darwin":
         return _pick_midi_file_macos(prompt)
 
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except ModuleNotFoundError as exc:
-        raise SystemExit(
-            "tkinter is unavailable in this Python build. Pass the MIDI path explicitly."
-        ) from exc
-
-    root = tk.Tk()
-    root.withdraw()
-    root.update_idletasks()
-    selected_path = filedialog.askopenfilename(
-        title=str(prompt),
-        filetypes=[("MIDI files", "*.mid *.midi"), ("All files", "*.*")],
-    )
-    root.destroy()
-    if not selected_path:
-        raise SystemExit("No MIDI file selected.")
-    return Path(selected_path).expanduser().resolve()
+    # On Linux use zenity (GTK subprocess) so the dialog runs in its own
+    # process and does not conflict with Pygame's SDL event loop.
+    return _pick_midi_file_zenity(prompt)
 
 
 def resolve_input_midi(
