@@ -44,6 +44,7 @@ from midi_workspace import (
 )
 from midi.real_orchestra_player import DynamicOrchestraPlayer
 from output_dispatcher import PygameMidiOrchestra, ScoreEventDispatcher, TempoTracker
+from portable_paths import resolve_project_path
 
 DEFAULT_SCORE_PATH = Path(__file__).resolve().parent / "generated_dataset" / "ideal.json"
 SAMPLE_RATE = 44_100
@@ -448,23 +449,26 @@ def apply_saved_settings(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def resolve_score_path(path: Path) -> Path:
-    suffix = path.suffix.lower()
+    resolved = resolve_project_path(path)
+    suffix = resolved.suffix.lower()
     if suffix == ".json":
-        return path
+        if not resolved.exists():
+            raise SystemExit(f"Score JSON not found: {resolved}")
+        return resolved
 
     if suffix in {".mid", ".midi"}:
-        sibling_json = path.with_suffix(".json")
+        sibling_json = resolved.with_suffix(".json")
         if sibling_json.exists():
             print(f"[INFO] Using sibling score JSON: {sibling_json}")
             return sibling_json
 
         raise SystemExit(
-            f"No sibling score JSON found for {path.name}. "
+            f"No sibling score JSON found for {resolved.name}. "
             "Run `midi_to_score.py` first or pass the `.json` file directly."
         )
 
     raise SystemExit(
-        f"Unsupported score input: {path}. "
+        f"Unsupported score input: {resolved}. "
         "Pass a score `.json`, or a `.mid`/`.midi` that already has a sibling `.json`."
     )
 
@@ -473,7 +477,7 @@ def resolve_optional_midi_path(path: Path | None) -> Path | None:
     if path is None:
         return None
 
-    resolved = path.expanduser().resolve()
+    resolved = resolve_project_path(path)
     suffix = resolved.suffix.lower()
     if suffix not in {".mid", ".midi"}:
         raise SystemExit(f"Unsupported orchestra MIDI input: {resolved}")
@@ -2719,16 +2723,31 @@ def workspace_launch_command(workspace: dict[str, Any], mode: str) -> list[str]:
     if not isinstance(commands, dict):
         raise RuntimeError("Workspace is missing launch commands.")
 
+    command: list[Any] | None
     if mode == "hands":
         command = commands.get("practice_left")
         if command is None:
             raise RuntimeError("This workspace has no left/right-hand practice mode.")
-        return [str(part) for part in command]
+    else:
+        command = commands.get("full_score_json") or commands.get("full_score_midi")
+        if command is None:
+            raise RuntimeError("This workspace has no full-score launch command.")
 
-    command = commands.get("full_score_json") or commands.get("full_score_midi")
-    if command is None:
-        raise RuntimeError("This workspace has no full-score launch command.")
-    return [str(part) for part in command]
+    normalized_command = [sys.executable]
+    for index, part in enumerate([str(item) for item in command]):
+        if index == 0:
+            continue
+        if part.startswith("--") or part in {"left", "right"}:
+            normalized_command.append(part)
+            continue
+
+        candidate = Path(part)
+        if candidate.is_absolute() or "/" in part or "\\" in part or candidate.suffix:
+            normalized_command.append(str(resolve_project_path(candidate)))
+            continue
+
+        normalized_command.append(part)
+    return normalized_command
 
 
 def most_recent_workspace_entry() -> dict[str, Any] | None:

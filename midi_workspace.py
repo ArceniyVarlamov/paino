@@ -39,6 +39,7 @@ from prepare_study_mode_batch import (
     slugify,
     write_score_json,
 )
+from portable_paths import portable_command, project_relative_path
 from smart_hand_splitter import split_midi_file
 
 DEFAULT_LIBRARY_ROOT = PROJECT_ROOT / "midi" / "library"
@@ -634,37 +635,38 @@ def build_tester_commands(
     orchestra_midi_path: Path | None = None,
 ) -> dict[str, list[str]]:
     commands: dict[str, list[str]] = {
-        "full_score_json": [
+        "full_score_json": portable_command([
             sys.executable,
-            str(PROJECT_ROOT / "interactive_tester.py"),
-            str(source_json_path),
-        ],
-        "full_score_midi": [
+            project_relative_path(PROJECT_ROOT / "interactive_tester.py"),
+            project_relative_path(source_json_path),
+        ]) or [],
+        "full_score_midi": portable_command([
             sys.executable,
-            str(PROJECT_ROOT / "interactive_tester.py"),
-            str(source_midi_path),
-        ],
+            project_relative_path(PROJECT_ROOT / "interactive_tester.py"),
+            project_relative_path(source_midi_path),
+        ]) or [],
     }
 
     if orchestra_midi_path is not None:
-        commands["full_score_json"].extend(["--orchestra-midi", str(orchestra_midi_path)])
-        commands["full_score_midi"].extend(["--orchestra-midi", str(orchestra_midi_path)])
+        orchestra_arg = project_relative_path(orchestra_midi_path)
+        commands["full_score_json"].extend(["--orchestra-midi", orchestra_arg])
+        commands["full_score_midi"].extend(["--orchestra-midi", orchestra_arg])
 
     if study_mode_dir is not None:
-        commands["practice_left"] = [
+        commands["practice_left"] = portable_command([
             sys.executable,
-            str(PROJECT_ROOT / "interactive_tester.py"),
-            str(study_mode_dir),
+            project_relative_path(PROJECT_ROOT / "interactive_tester.py"),
+            project_relative_path(study_mode_dir),
             "--practice-hand",
             "left",
-        ]
-        commands["practice_right"] = [
+        ]) or []
+        commands["practice_right"] = portable_command([
             sys.executable,
-            str(PROJECT_ROOT / "interactive_tester.py"),
-            str(study_mode_dir),
+            project_relative_path(PROJECT_ROOT / "interactive_tester.py"),
+            project_relative_path(study_mode_dir),
             "--practice-hand",
             "right",
-        ]
+        ]) or []
 
     return commands
 
@@ -808,11 +810,11 @@ def import_piece_workspace_with_progress(
                 right_calibration_cmd, right_profile_path = right_calibration_future.result()
 
             study_mode_payload = {
-                "directory": str(study_mode_dir),
-                "left_midi": str(left_midi_path),
-                "right_midi": str(right_midi_path),
-                "left_json": str(left_json_path),
-                "right_json": str(right_json_path),
+                "directory": project_relative_path(study_mode_dir),
+                "left_midi": project_relative_path(left_midi_path),
+                "right_midi": project_relative_path(right_midi_path),
+                "left_json": project_relative_path(left_json_path),
+                "right_json": project_relative_path(right_json_path),
                 "split_strategy": "smart_hand_splitter",
                 "chord_epsilon": float(chord_epsilon),
                 "left_notes": int(split_result.left_notes),
@@ -821,11 +823,15 @@ def import_piece_workspace_with_progress(
                 "right_score_states": len(right_score.get("notes", [])),
                 "left_summary": split_result.left_summary,
                 "right_summary": split_result.right_summary,
-                "left_profile_path": str(left_profile_path) if left_profile_path is not None else None,
-                "right_profile_path": str(right_profile_path) if right_profile_path is not None else None,
-                "left_calibration_command": left_calibration_cmd,
-                "right_calibration_command": right_calibration_cmd,
-                "prep_report": str(prep_report_path),
+                "left_profile_path": (
+                    project_relative_path(left_profile_path) if left_profile_path is not None else None
+                ),
+                "right_profile_path": (
+                    project_relative_path(right_profile_path) if right_profile_path is not None else None
+                ),
+                "left_calibration_command": portable_command(left_calibration_cmd),
+                "right_calibration_command": portable_command(right_calibration_cmd),
+                "prep_report": project_relative_path(prep_report_path),
             }
             write_json(
                 prep_report_path,
@@ -851,8 +857,12 @@ def import_piece_workspace_with_progress(
     orchestra_payload: dict[str, Any] | None = None
     if source_bundle.orchestra_midi_path is not None:
         orchestra_payload = {
-            "imported_midi": str(source_bundle.orchestra_midi_path),
-            "original_input": str(source_bundle.orchestra_origin) if source_bundle.orchestra_origin is not None else None,
+            "imported_midi": project_relative_path(source_bundle.orchestra_midi_path),
+            "original_input": (
+                project_relative_path(source_bundle.orchestra_origin)
+                if source_bundle.orchestra_origin is not None
+                else None
+            ),
             "source_kind": source_bundle.orchestra_source_kind,
             "piano_track_index": source_bundle.piano_track_index,
             "piano_track_name": source_bundle.piano_track_name,
@@ -862,17 +872,19 @@ def import_piece_workspace_with_progress(
         "title": title,
         "slug": workspace_dir.name,
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "workspace_dir": str(workspace_dir),
+        "workspace_dir": project_relative_path(workspace_dir),
         "source": {
-            "original_input": str(selected_input_path),
-            "tracking_source_origin": str(source_bundle.tracking_source_origin),
-            "imported_midi": str(imported_midi_path),
-            "imported_score_json": str(imported_json_path),
+            "original_input": project_relative_path(selected_input_path),
+            "tracking_source_origin": project_relative_path(source_bundle.tracking_source_origin),
+            "imported_midi": project_relative_path(imported_midi_path),
+            "imported_score_json": project_relative_path(imported_json_path),
             "full_score_states": len(full_score.get("notes", [])),
             "full_chord_policy": args.full_chord_policy,
             "full_chord_epsilon": float(args.full_chord_epsilon),
-            "profile_path": str(source_profile_path) if source_profile_path is not None else None,
-            "calibration_command": source_calibration_cmd,
+            "profile_path": (
+                project_relative_path(source_profile_path) if source_profile_path is not None else None
+            ),
+            "calibration_command": portable_command(source_calibration_cmd),
         },
         "orchestra": orchestra_payload,
         "study_mode": study_mode_payload,
@@ -881,7 +893,7 @@ def import_piece_workspace_with_progress(
     }
     write_json(workspace_dir / WORKSPACE_FILE_NAME, workspace_payload)
     manifest_path = update_library_manifest(library_root, workspace_payload)
-    workspace_payload["library_manifest"] = str(manifest_path)
+    workspace_payload["library_manifest"] = project_relative_path(manifest_path)
     write_json(workspace_dir / WORKSPACE_FILE_NAME, workspace_payload)
     emit_progress(progress_callback, "Workspace Ready", f"Prepared {workspace_payload['title']}")
     return workspace_payload

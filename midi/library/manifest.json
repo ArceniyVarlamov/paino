@@ -4,37 +4,37 @@
       "title": "rach_solo",
       "slug": "rach_solo",
       "created_at": "2026-04-28T01:00:52+03:00",
-      "workspace_dir": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo",
+      "workspace_dir": "midi/library/rach_solo",
       "source": {
-        "original_input": "/Users/arceniy/Documents/Projects/Piano/midi/rach_solo.mid",
-        "tracking_source_origin": "/Users/arceniy/Documents/Projects/Piano/midi/rach_solo.mid",
-        "imported_midi": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/source/source.mid",
-        "imported_score_json": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/source/source.json",
+        "original_input": "midi/rach_solo.mid",
+        "tracking_source_origin": "midi/rach_solo.mid",
+        "imported_midi": "midi/library/rach_solo/source/source.mid",
+        "imported_score_json": "midi/library/rach_solo/source/source.json",
         "full_score_states": 3791,
         "full_chord_policy": "chord",
         "full_chord_epsilon": 0.03,
-        "profile_path": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/source/source.hybrid_profile.json",
+        "profile_path": "midi/library/rach_solo/source/source.hybrid_profile.json",
         "calibration_command": [
-          "/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "/Users/arceniy/Documents/Projects/Piano/calibrate_hybrid_profile.py",
-          "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/source/source.json",
+          "python3",
+          "calibrate_hybrid_profile.py",
+          "midi/library/rach_solo/source/source.json",
           "--level",
           "fast"
         ]
       },
       "orchestra": {
-        "imported_midi": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/orchestra/orchestra.mid",
-        "original_input": "/Users/arceniy/Documents/Projects/Piano/midi/rach_orchestra.mid",
+        "imported_midi": "midi/library/rach_solo/orchestra/orchestra.mid",
+        "original_input": "midi/rach_orchestra.mid",
         "source_kind": "explicit",
         "piano_track_index": null,
         "piano_track_name": null
       },
       "study_mode": {
-        "directory": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode",
-        "left_midi": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/left_hand.mid",
-        "right_midi": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/right_hand.mid",
-        "left_json": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/left_hand.json",
-        "right_json": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/right_hand.json",
+        "directory": "midi/library/rach_solo/study_mode",
+        "left_midi": "midi/library/rach_solo/study_mode/left_hand.mid",
+        "right_midi": "midi/library/rach_solo/study_mode/right_hand.mid",
+        "left_json": "midi/library/rach_solo/study_mode/left_hand.json",
+        "right_json": "midi/library/rach_solo/study_mode/right_hand.json",
         "split_strategy": "smart_hand_splitter",
         "chord_epsilon": 0.03,
         "left_notes": 3552,
@@ -43,50 +43,50 @@
         "right_score_states": 2317,
         "left_summary": "3552 notes | range 24-83 | mean pitch 57.99",
         "right_summary": "3604 notes | range 24-103 | mean pitch 74.74",
-        "left_profile_path": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/left_hand.hybrid_profile.json",
-        "right_profile_path": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/right_hand.hybrid_profile.json",
+        "left_profile_path": "midi/library/rach_solo/study_mode/left_hand.hybrid_profile.json",
+        "right_profile_path": "midi/library/rach_solo/study_mode/right_hand.hybrid_profile.json",
         "left_calibration_command": [
-          "/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "/Users/arceniy/Documents/Projects/Piano/calibrate_hybrid_profile.py",
-          "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/left_hand.json",
+          "python3",
+          "calibrate_hybrid_profile.py",
+          "midi/library/rach_solo/study_mode/left_hand.json",
           "--level",
           "fast"
         ],
         "right_calibration_command": [
-          "/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "/Users/arceniy/Documents/Projects/Piano/calibrate_hybrid_profile.py",
-          "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/right_hand.json",
+          "python3",
+          "calibrate_hybrid_profile.py",
+          "midi/library/rach_solo/study_mode/right_hand.json",
           "--level",
           "fast"
         ],
-        "prep_report": "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode/prep_report.json"
+        "prep_report": "midi/library/rach_solo/study_mode/prep_report.json"
       },
       "commands": {
         "full_score_json": [
-          "/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "/Users/arceniy/Documents/Projects/Piano/interactive_tester.py",
-          "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/source/source.json",
+          "python3",
+          "interactive_tester.py",
+          "midi/library/rach_solo/source/source.json",
           "--orchestra-midi",
-          "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/orchestra/orchestra.mid"
+          "midi/library/rach_solo/orchestra/orchestra.mid"
         ],
         "full_score_midi": [
-          "/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "/Users/arceniy/Documents/Projects/Piano/interactive_tester.py",
-          "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/source/source.mid",
+          "python3",
+          "interactive_tester.py",
+          "midi/library/rach_solo/source/source.mid",
           "--orchestra-midi",
-          "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/orchestra/orchestra.mid"
+          "midi/library/rach_solo/orchestra/orchestra.mid"
         ],
         "practice_left": [
-          "/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "/Users/arceniy/Documents/Projects/Piano/interactive_tester.py",
-          "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode",
+          "python3",
+          "interactive_tester.py",
+          "midi/library/rach_solo/study_mode",
           "--practice-hand",
           "left"
         ],
         "practice_right": [
-          "/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "/Users/arceniy/Documents/Projects/Piano/interactive_tester.py",
-          "/Users/arceniy/Documents/Projects/Piano/midi/library/rach_solo/study_mode",
+          "python3",
+          "interactive_tester.py",
+          "midi/library/rach_solo/study_mode",
           "--practice-hand",
           "right"
         ]
