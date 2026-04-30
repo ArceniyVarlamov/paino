@@ -2901,6 +2901,133 @@ def most_recent_workspace_entry() -> dict[str, Any] | None:
     return max(entries, key=lambda entry: str(entry.get("created_at", "")))
 
 
+def pygame_pick_midi_file(
+    screen: pygame.Surface,
+    fonts: "dict[str, pygame.font.Font]",
+    *,
+    prompt: str = "Select MIDI file",
+) -> "Path | None":
+    """File browser rendered entirely within the Pygame window — no external tools needed."""
+    PROJECT_ROOT = Path(__file__).resolve().parent
+    current_dir = PROJECT_ROOT
+    scroll_offset = 0
+    ITEM_H = 36
+    PANEL_W, PANEL_H = 820, 540
+    sx = (screen.get_width() - PANEL_W) // 2
+    sy = (screen.get_height() - PANEL_H) // 2
+    LIST_Y = sy + 80
+    LIST_H = PANEL_H - 140
+    visible_items = LIST_H // ITEM_H
+
+    clock = pygame.time.Clock()
+    body_font = fonts.get("body") or pygame.font.SysFont("Arial", 22)
+    small_font = fonts.get("small") or pygame.font.SysFont("Arial", 16)
+    title_font = fonts.get("title") or pygame.font.SysFont("Arial", 28, bold=True)
+
+    def build_entries(d: Path) -> list:
+        entries = []
+        if d != d.parent:
+            entries.append(("dir", "..", d.parent))
+        try:
+            items = sorted(d.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except PermissionError:
+            return entries
+        for p in items:
+            if p.name.startswith("."):
+                continue
+            if p.is_dir():
+                entries.append(("dir", p.name, p))
+            elif p.suffix.lower() in {".mid", ".midi"}:
+                entries.append(("midi", p.name, p))
+        return entries
+
+    entries = build_entries(current_dir)
+    background_snapshot = screen.copy()
+
+    cancel_rect = pygame.Rect(sx + PANEL_W - 130, sy + PANEL_H - 52, 110, 36)
+
+    while True:
+        screen.blit(background_snapshot, (0, 0))
+        overlay = pygame.Surface((screen.get_width(), screen.get_height()), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 140))
+        screen.blit(overlay, (0, 0))
+
+        pygame.draw.rect(screen, (247, 242, 235), (sx, sy, PANEL_W, PANEL_H), border_radius=10)
+        pygame.draw.rect(screen, (35, 110, 215), (sx, sy, PANEL_W, PANEL_H), 2, border_radius=10)
+
+        title_surf = title_font.render(prompt, True, (28, 32, 40))
+        screen.blit(title_surf, (sx + 20, sy + 14))
+
+        try:
+            dir_label = str(current_dir.relative_to(PROJECT_ROOT))
+        except ValueError:
+            dir_label = str(current_dir)
+        dir_surf = small_font.render(dir_label, True, (85, 91, 102))
+        screen.blit(dir_surf, (sx + 20, sy + 54))
+
+        pygame.draw.rect(screen, (225, 218, 208), (sx + 10, LIST_Y, PANEL_W - 20, LIST_H), border_radius=4)
+
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+
+        visible_entries = entries[scroll_offset: scroll_offset + visible_items]
+        for i, (kind, name, path) in enumerate(visible_entries):
+            row_rect = pygame.Rect(sx + 10, LIST_Y + i * ITEM_H, PANEL_W - 20, ITEM_H)
+            is_hovered = row_rect.collidepoint(mouse_x, mouse_y)
+            if is_hovered:
+                pygame.draw.rect(screen, (210, 225, 243), row_rect, border_radius=3)
+            if kind == "dir":
+                icon = "▶ "
+                color = (35, 110, 215)
+            else:
+                icon = "♩ "
+                color = (28, 32, 40)
+            label = icon + name
+            text_surf = body_font.render(label, True, color)
+            screen.blit(text_surf, (row_rect.x + 10, row_rect.y + (ITEM_H - text_surf.get_height()) // 2))
+
+        if len(entries) > visible_items:
+            sb_x = sx + PANEL_W - 18
+            sb_h = LIST_H
+            sb_thumb_h = max(30, sb_h * visible_items // max(len(entries), 1))
+            sb_thumb_y = LIST_Y + scroll_offset * (sb_h - sb_thumb_h) // max(len(entries) - visible_items, 1)
+            pygame.draw.rect(screen, (200, 195, 188), (sb_x, LIST_Y, 8, sb_h), border_radius=4)
+            pygame.draw.rect(screen, (35, 110, 215), (sb_x, sb_thumb_y, 8, sb_thumb_h), border_radius=4)
+
+        cancel_color = (210, 225, 243) if cancel_rect.collidepoint(mouse_x, mouse_y) else (224, 234, 245)
+        pygame.draw.rect(screen, cancel_color, cancel_rect, border_radius=6)
+        cancel_surf = body_font.render("Cancel", True, (28, 32, 40))
+        screen.blit(cancel_surf, (cancel_rect.x + (cancel_rect.w - cancel_surf.get_width()) // 2,
+                                   cancel_rect.y + (cancel_rect.h - cancel_surf.get_height()) // 2))
+
+        pygame.display.flip()
+        clock.tick(60)
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return None
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    return None
+                if event.key == pygame.K_UP:
+                    scroll_offset = max(0, scroll_offset - 1)
+                if event.key == pygame.K_DOWN:
+                    scroll_offset = min(max(0, len(entries) - visible_items), scroll_offset + 1)
+            if event.type == pygame.MOUSEWHEEL:
+                scroll_offset = max(0, min(max(0, len(entries) - visible_items), scroll_offset - event.y))
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if cancel_rect.collidepoint(event.pos):
+                    return None
+                for i, (kind, name, path) in enumerate(visible_entries):
+                    row_rect = pygame.Rect(sx + 10, LIST_Y + i * ITEM_H, PANEL_W - 20, ITEM_H)
+                    if row_rect.collidepoint(event.pos):
+                        if kind == "dir":
+                            current_dir = path
+                            entries = build_entries(current_dir)
+                            scroll_offset = 0
+                        else:
+                            return path
+
+
 def run_startup_launcher(*, setup_expected: bool) -> int:
     pygame.init()
     pygame.font.init()
@@ -3055,32 +3182,27 @@ def run_startup_launcher(*, setup_expected: bool) -> int:
                     pygame.quit()
                     os.execv(sys.executable, command)
                 if choose_midi_rect.collidepoint(event.pos):
-                    try:
-                        selected_midi = pick_midi_file(
-                            prompt=(
-                                "Select piano MIDI file to import"
-                                if selected_mode == "orchestra"
-                                else "Select MIDI file to import"
-                            )
-                        )
-                    except SystemExit as exc:
-                        error_text = str(exc).strip()
-                        if error_text and error_text != "No MIDI file selected.":
-                            error_message = error_text
+                    selected_midi = pygame_pick_midi_file(
+                        screen,
+                        fonts,
+                        prompt=(
+                            "Select piano MIDI file to import"
+                            if selected_mode == "orchestra"
+                            else "Select MIDI file to import"
+                        ),
+                    )
+                    if selected_midi is None:
                         continue
 
                     selected_orchestra_midi: Path | None = None
                     if selected_mode == "orchestra":
-                        try:
-                            selected_orchestra_midi = pick_midi_file(
-                                prompt="Select orchestra MIDI file to import"
-                            )
-                        except SystemExit as exc:
-                            error_text = str(exc).strip()
-                            if not error_text or error_text == "No MIDI file selected.":
-                                error_message = "Orchestra MIDI is required for Orchestra / Full Score import."
-                            else:
-                                error_message = error_text
+                        selected_orchestra_midi = pygame_pick_midi_file(
+                            screen,
+                            fonts,
+                            prompt="Select orchestra MIDI file to import",
+                        )
+                        if selected_orchestra_midi is None:
+                            error_message = "Orchestra MIDI is required for Orchestra / Full Score import."
                             continue
 
                     processing = True
