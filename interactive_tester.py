@@ -100,6 +100,40 @@ class PianoKey:
     is_black: bool
 
 
+@dataclass(frozen=True)
+class LiveMidiMessage:
+    type: str
+    note: int
+    velocity: int
+
+
+class PygameLiveMidiInputPort:
+    def __init__(self, device_id: int) -> None:
+        self.device_id = int(device_id)
+        self._input = pygame.midi.Input(self.device_id)
+
+    def iter_pending(self) -> list[LiveMidiMessage]:
+        messages: list[LiveMidiMessage] = []
+        while self._input.poll():
+            batch = self._input.read(64)
+            if not batch:
+                break
+            for payload, _timestamp in batch:
+                if len(payload) < 3:
+                    continue
+                status = int(payload[0]) & 0xF0
+                note = int(payload[1])
+                velocity = int(payload[2])
+                if status == 0x90:
+                    messages.append(LiveMidiMessage("note_on", note, velocity))
+                elif status == 0x80:
+                    messages.append(LiveMidiMessage("note_off", note, velocity))
+        return messages
+
+    def close(self) -> None:
+        self._input.close()
+
+
 WHITE_KEY_COUNT = sum(
     1
     for pitch in range(VISIBLE_PIANO_START, VISIBLE_PIANO_END + 1)
@@ -539,10 +573,19 @@ def resolve_midi_output_id(requested_output_id: int) -> int:
 
 
 def available_midi_input_ports() -> list[str]:
-    try:
-        return list(mido.get_input_names())
-    except Exception:
-        return []
+    return [name for _device_id, name in available_midi_input_devices()]
+
+
+def available_midi_input_devices() -> list[tuple[int, str]]:
+    devices: list[tuple[int, str]] = []
+    if not pygame.midi.get_init():
+        return devices
+    for device_id in range(pygame.midi.get_count()):
+        info = pygame.midi.get_device_info(device_id)
+        if info is None or not bool(info[2]):
+            continue
+        devices.append((int(device_id), info[1].decode(errors="ignore")))
+    return devices
 
 
 def choose_default_midi_input_port(port_names: list[str]) -> str:
@@ -575,6 +618,17 @@ def choose_default_midi_input_port(port_names: list[str]) -> str:
         return non_virtual[0]
 
     return port_names[0]
+
+
+def choose_default_midi_input_device(devices: list[tuple[int, str]]) -> tuple[int, str]:
+    if not devices:
+        raise RuntimeError("No MIDI input ports are available.")
+
+    preferred_name = choose_default_midi_input_port([name for _device_id, name in devices])
+    for device_id, name in devices:
+        if name == preferred_name:
+            return device_id, name
+    return devices[0]
 
 
 def choose_default_midi_output_id(output_devices: list[tuple[int, str]]) -> int | None:
@@ -631,34 +685,37 @@ def settings_require_setup(
 
 
 def resolve_midi_input_port_name(requested_port: str | None) -> str:
-    port_names = available_midi_input_ports()
-    if not port_names:
+    _device_id, port_name = resolve_midi_input_device(requested_port)
+    return port_name
+
+
+def resolve_midi_input_device(requested_port: str | None) -> tuple[int, str]:
+    devices = available_midi_input_devices()
+    if not devices:
         raise RuntimeError("No MIDI input ports are available.")
 
-    if requested_port is None:
-        return choose_default_midi_input_port(port_names)
+    if requested_port is None or not requested_port.strip():
+        return choose_default_midi_input_device(devices)
 
     requested = requested_port.strip()
-    if not requested:
-        return choose_default_midi_input_port(port_names)
-
-    if requested in port_names:
-        return requested
+    exact_matches = [(device_id, name) for device_id, name in devices if name == requested]
+    if exact_matches:
+        return exact_matches[0]
 
     needle = requested.lower()
-    matches = [name for name in port_names if needle in name.lower()]
+    matches = [(device_id, name) for device_id, name in devices if needle in name.lower()]
     if len(matches) == 1:
         return matches[0]
 
     if len(matches) > 1:
-        listing = "\n  - ".join(matches)
+        listing = "\n  - ".join(f"{device_id}: {name}" for device_id, name in matches)
         raise RuntimeError(
             "MIDI input port is ambiguous. Matched multiple ports:\n"
             f"  - {listing}\n"
             "Pass the exact --midi-in-port value."
         )
 
-    listing = "\n  - ".join(port_names)
+    listing = "\n  - ".join(f"{device_id}: {name}" for device_id, name in devices)
     raise RuntimeError(
         f"MIDI input port not found: {requested_port}\n"
         "Available ports:\n"
@@ -3813,9 +3870,12 @@ def main() -> int:
     live_midi_input_name: str | None = None
     if args.live_midi_in:
         try:
-            live_midi_input_name = resolve_midi_input_port_name(args.midi_in_port)
-            live_midi_input_port = mido.open_input(live_midi_input_name)
-            print(f"[INFO] Live MIDI input enabled: {live_midi_input_name}")
+            live_midi_input_device_id, live_midi_input_name = resolve_midi_input_device(args.midi_in_port)
+            live_midi_input_port = PygameLiveMidiInputPort(live_midi_input_device_id)
+            print(
+                f"[INFO] Live MIDI input enabled: {live_midi_input_name} "
+                f"(device #{live_midi_input_device_id})"
+            )
         except Exception as exc:
             print(f"[WARN] Live MIDI input disabled: {exc}")
             live_midi_input_port = None
