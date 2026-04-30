@@ -588,6 +588,19 @@ def available_midi_input_devices() -> list[tuple[int, str]]:
     return devices
 
 
+def is_virtual_midi_input_port_name(port_name: str) -> bool:
+    lowered = str(port_name).strip().lower()
+    return any(
+        token in lowered
+        for token in (
+            "iac",
+            "logic pro virtual out",
+            "network session",
+            "loopback",
+        )
+    )
+
+
 def choose_default_midi_input_port(port_names: list[str]) -> str:
     if not port_names:
         raise RuntimeError("No MIDI input ports are available.")
@@ -629,6 +642,42 @@ def choose_default_midi_input_device(devices: list[tuple[int, str]]) -> tuple[in
         if name == preferred_name:
             return device_id, name
     return devices[0]
+
+
+def preferred_auto_midi_input_port(port_names: list[str]) -> str | None:
+    physical_ports = [name for name in port_names if not is_virtual_midi_input_port_name(name)]
+    if not physical_ports:
+        return None
+    return choose_default_midi_input_port(physical_ports)
+
+
+def sanitize_auto_selected_midi_input_port(
+    requested_port: str | None,
+    port_names: list[str],
+) -> tuple[str | None, str | None]:
+    preferred_port = preferred_auto_midi_input_port(port_names)
+    requested = requested_port.strip() if isinstance(requested_port, str) and requested_port.strip() else None
+
+    if preferred_port is None:
+        if requested is None:
+            return None, None
+        if requested in port_names and not is_virtual_midi_input_port_name(requested):
+            return requested, None
+        return None, "Only virtual MIDI inputs were detected; live MIDI input was disabled."
+
+    if requested is None:
+        return preferred_port, None
+    if requested == preferred_port:
+        return requested, None
+    if requested not in port_names:
+        return preferred_port, (
+            f"Saved MIDI input '{requested}' is unavailable; using '{preferred_port}' instead."
+        )
+    if is_virtual_midi_input_port_name(requested):
+        return preferred_port, (
+            f"Saved MIDI input '{requested}' is virtual; using '{preferred_port}' instead."
+        )
+    return requested, None
 
 
 def choose_default_midi_output_id(output_devices: list[tuple[int, str]]) -> int | None:
@@ -695,6 +744,11 @@ def resolve_midi_input_device(requested_port: str | None) -> tuple[int, str]:
         raise RuntimeError("No MIDI input ports are available.")
 
     if requested_port is None or not requested_port.strip():
+        preferred_port = preferred_auto_midi_input_port([name for _device_id, name in devices])
+        if preferred_port is not None:
+            for device_id, name in devices:
+                if name == preferred_port:
+                    return device_id, name
         return choose_default_midi_input_device(devices)
 
     requested = requested_port.strip()
@@ -3292,11 +3346,7 @@ def main() -> int:
         wizard_input_ports = available_midi_input_ports()
 
         def autodetect_wizard_settings() -> dict[str, Any]:
-            detected_input = (
-                choose_default_midi_input_port(wizard_input_ports)
-                if wizard_input_ports
-                else None
-            )
+            detected_input = preferred_auto_midi_input_port(wizard_input_ports)
             detected_output = choose_default_midi_output_id(wizard_output_devices)
             return {
                 "midi_out": detected_output,
@@ -3553,6 +3603,16 @@ def main() -> int:
 
     initial_detected_outputs = available_midi_output_devices()
     initial_detected_inputs = available_midi_input_ports()
+    if bool(args.live_midi_in) and not cli_option_present("--midi-in-port"):
+        sanitized_port, repair_message = sanitize_auto_selected_midi_input_port(
+            args.midi_in_port,
+            initial_detected_inputs,
+        )
+        args.midi_in_port = sanitized_port
+        if sanitized_port is None:
+            args.live_midi_in = False
+        if repair_message:
+            print(f"[INFO] {repair_message}")
     if settings_require_setup(
         args,
         settings_exist=settings_exist,
@@ -3737,6 +3797,20 @@ def main() -> int:
             print(f"[WARN] Real orchestra disabled: {exc}")
             orchestra = None
             orchestra_engine_label = "Real MIDI unavailable"
+            try:
+                orchestra = LocalOrchestraAccompaniment(
+                    orchestra_midi_path,
+                    dispatcher,
+                    volume_scale=orchestra_volume_scale,
+                )
+                orchestra_engine_label = f"{orchestra.status_label} fallback: {orchestra_midi_path.name}"
+                real_orchestra_active = True
+                orchestra.start()
+                print("[INFO] Falling back to local orchestra samples.")
+            except RuntimeError as fallback_exc:
+                print(f"[WARN] Local orchestra fallback disabled: {fallback_exc}")
+                orchestra = None
+                orchestra_engine_label = "Orchestra unavailable"
     elif args.fallback_midi_orchestra:
         orchestra = PygameMidiOrchestra(dispatcher, score_path)
         orchestra_engine_label = orchestra.status_label
@@ -3913,7 +3987,8 @@ def main() -> int:
         "mute_local_piano": bool(args.mute_local_piano),
     }
     if settings_state["live_midi_in"] and settings_state["midi_in_port"] is None and detected_midi_input_ports:
-        settings_state["midi_in_port"] = choose_default_midi_input_port(detected_midi_input_ports)
+        settings_state["midi_in_port"] = preferred_auto_midi_input_port(detected_midi_input_ports)
+        settings_state["live_midi_in"] = settings_state["midi_in_port"] is not None
     stored_settings = dict(settings_state)
     advanced_settings = dict(settings_state)
     settings_panel_open = False
@@ -4840,10 +4915,11 @@ def main() -> int:
                         advanced_settings["live_midi_in"] = not bool(advanced_settings.get("live_midi_in"))
                         if advanced_settings["live_midi_in"] and advanced_settings.get("midi_in_port") is None:
                             advanced_settings["midi_in_port"] = (
-                                choose_default_midi_input_port(detected_midi_input_ports)
+                                preferred_auto_midi_input_port(detected_midi_input_ports)
                                 if detected_midi_input_ports
                                 else None
                             )
+                            advanced_settings["live_midi_in"] = advanced_settings["midi_in_port"] is not None
                         continue
                     if input_port_left_rect.collidepoint(click_pos):
                         cycle_input_port_setting(-1)
