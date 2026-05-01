@@ -2001,6 +2001,19 @@ class LocalOrchestraSampleBank:
         *,
         duration: float,
     ) -> pygame.mixer.Sound:
+        sound, _sample, _instrument_key = self.resolve_sound(
+            instrument, midi_pitch, velocity, duration=duration
+        )
+        return sound
+
+    def resolve_sound(
+        self,
+        instrument: str,
+        midi_pitch: int,
+        velocity: int,
+        *,
+        duration: float,
+    ) -> tuple[pygame.mixer.Sound, "LocalOrchestraSample", str]:
         instrument_key = normalize_local_instrument_name(instrument)
         with self._lock:
             candidates = self._sample_index.get(instrument_key)
@@ -2026,12 +2039,12 @@ class LocalOrchestraSampleBank:
             cache_key = f"{sample.zip_path}:{sample.member_name}"
             cached = self._sound_cache.get(cache_key)
             if cached is not None:
-                return cached
+                return cached, sample, instrument_key
 
             extracted_path = self._extract_sample(sample)
             sound = pygame.mixer.Sound(str(extracted_path))
             self._sound_cache[cache_key] = sound
-            return sound
+            return sound, sample, instrument_key
 
     def close(self) -> None:
         for zip_file in self._zip_files.values():
@@ -2294,6 +2307,9 @@ class LocalOrchestraAccompaniment:
     _MIN_TEMPO_RATIO = 0.25
     _WAIT_GRANULARITY = 0.002
     _SEEK_TIME_THRESHOLD = 1.0
+    _BACKWARD_DISPATCH_TOLERANCE = 0.025
+    _PLAYHEAD_CAP_EPSILON = 0.001
+    _RESET_TARGET_WINDOW = 0.25
 
     def __init__(
         self,
@@ -2329,6 +2345,38 @@ class LocalOrchestraAccompaniment:
         self._fallback_sound_cache: dict[tuple[int, int], pygame.mixer.Sound] = {}
         self.status_label = "Local orchestra samples"
 
+        self._debug = os.environ.get("PIANO_DEBUG_ORCHESTRA", "").strip() not in ("", "0", "false", "False")
+        self._debug_stats = {
+            "emits": 0,
+            "lag_sum": 0.0,
+            "lag_max": 0.0,
+            "loops_nonzero": 0,
+            "fallback_pitch_used": 0,
+            "semitone_offset_sum": 0.0,
+            "semitone_offset_max": 0,
+            "exact_pitch": 0,
+            "instrument_fallback": 0,
+            "dispatch_age_sum": 0.0,
+            "dispatch_age_max": 0.0,
+            "stale_dispatches": 0,
+            "duplicate_dispatches": 0,
+            "backward_rewinds": 0,
+        }
+        self._debug_dispatch_count = 0
+        self._debug_seek_count = 0
+        self._debug_last_dispatch_wall: float | None = None
+        self._debug_start_wall = time.monotonic()
+
+        if self._debug:
+            self._print_debug_bank_summary()
+            print(
+                "DEBUG_ORCH HEADER "
+                "t_clock,source_time,playhead,lag,note,instrument_in,instrument_used,"
+                "sample_pitch,semitone_off,length_code,sample_len,scaled_dur,loops,"
+                "dispatch_age,velocity,fallback_piano",
+                flush=True,
+            )
+
         self._dispatcher.subscribe(self.handle_dispatch)
 
     @property
@@ -2363,6 +2411,8 @@ class LocalOrchestraAccompaniment:
             thread.join(timeout=timeout)
         self._thread = None
         self.panic()
+        if self._debug:
+            self._print_debug_summary()
         self._sample_bank.close()
 
     def resume(self) -> None:
@@ -2393,24 +2443,55 @@ class LocalOrchestraAccompaniment:
             self._transport_paused = False
 
     def handle_dispatch(self, index: int, tempo_ratio: float) -> None:
-        target_time = self._score_index_to_target_time(int(index))
-        next_target_time = self._score_index_to_next_target_time(int(index))
+        score_index = int(index)
+        target_time = self._score_index_to_target_time(score_index)
+        next_target_time = self._score_index_to_next_target_time(score_index)
         anchor_clock_time = dispatcher_event_anchor_time(self._dispatcher, time.monotonic)
+        reset_target = self._is_reset_dispatch_target(score_index, target_time)
+        skipped_reason: str | None = None
         with self._state_lock:
             previous_target_time = self._master_target_time
-            self._master_target_time = target_time
-            self._master_next_target_time = next_target_time
-            self._master_anchor_clock_time = anchor_clock_time
             self._tempo_ratio = max(self._MIN_TEMPO_RATIO, float(tempo_ratio))
             self._transport_paused = False
+
+            if (
+                previous_target_time is not None
+                and abs(target_time - previous_target_time) <= 1e-6
+            ):
+                skipped_reason = "duplicate"
+            elif self._is_stale_backward_dispatch_locked(
+                target_time,
+                previous_target_time,
+                reset_target=reset_target,
+            ):
+                skipped_reason = "stale_backward"
+            else:
+                self._master_target_time = target_time
+                self._master_next_target_time = next_target_time
+                self._master_anchor_clock_time = anchor_clock_time
+
+            if skipped_reason is not None:
+                if self._debug:
+                    if skipped_reason == "duplicate":
+                        self._debug_stats["duplicate_dispatches"] += 1
+                    else:
+                        self._debug_stats["stale_dispatches"] += 1
+                return
+
             if previous_target_time is None:
                 self._seek_request_time = target_time
-            elif abs(target_time - previous_target_time) > self._SEEK_TIME_THRESHOLD:
-                self._seek_request_time = target_time
-            elif self._last_source_time is not None and target_time < (
-                self._last_source_time - self._SEEK_TIME_THRESHOLD
+            elif (
+                reset_target
+                and previous_target_time - target_time > self._BACKWARD_DISPATCH_TOLERANCE
             ):
                 self._seek_request_time = target_time
+                if self._debug:
+                    self._debug_stats["backward_rewinds"] += 1
+            elif target_time - previous_target_time > self._SEEK_TIME_THRESHOLD:
+                self._seek_request_time = target_time
+        if self._debug:
+            self._debug_dispatch_count += 1
+            self._debug_last_dispatch_wall = time.monotonic()
 
     def _play_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -2446,14 +2527,45 @@ class LocalOrchestraAccompaniment:
 
     def _perform_seek(self, target_time: float) -> None:
         self.panic()
+        if self._debug:
+            self._debug_seek_count += 1
         with self._state_lock:
             self._event_index = int(np.searchsorted(self._source_times, target_time, side="left"))
             self._last_source_time = float(target_time)
 
+    def _is_stale_backward_dispatch_locked(
+        self,
+        target_time: float,
+        previous_target_time: float | None,
+        *,
+        reset_target: bool,
+    ) -> bool:
+        if reset_target:
+            return False
+
+        tolerance = self._BACKWARD_DISPATCH_TOLERANCE
+        if previous_target_time is not None and target_time < (previous_target_time - tolerance):
+            return True
+
+        if self._last_source_time is not None and target_time < (self._last_source_time - tolerance):
+            return True
+
+        return False
+
+    def _is_reset_dispatch_target(self, score_index: int, target_time: float) -> bool:
+        if target_time <= self._RESET_TARGET_WINDOW:
+            return True
+
+        position = self._dispatcher.tempo_tracker.index_to_position.get(int(score_index))
+        return position == 0
+
     def _emit_event(self, event: LocalOrchestraNoteEvent, tempo_ratio: float) -> None:
         scaled_duration = max(0.05, float(event.duration) / max(self._MIN_TEMPO_RATIO, float(tempo_ratio)))
+        picked_sample: LocalOrchestraSample | None = None
+        instrument_used = event.instrument
+        fallback_piano = False
         try:
-            sound = self._sample_bank.get_sound(
+            sound, picked_sample, instrument_used = self._sample_bank.resolve_sound(
                 event.instrument,
                 event.note,
                 event.velocity,
@@ -2461,6 +2573,7 @@ class LocalOrchestraAccompaniment:
             )
         except RuntimeError:
             sound = self._fallback_sound(event.note, scaled_duration)
+            fallback_piano = True
 
         channel = pygame.mixer.Channel(self._channel_indices[self._channel_cursor])
         self._channel_cursor = (self._channel_cursor + 1) % len(self._channel_indices)
@@ -2469,6 +2582,17 @@ class LocalOrchestraAccompaniment:
         sample_length = max(0.05, float(sound.get_length()))
         loops = max(0, int(scaled_duration // sample_length))
         channel.play(sound, loops=loops, maxtime=max(1, int(scaled_duration * 1000)))
+
+        if self._debug:
+            self._record_debug_emit(
+                event,
+                scaled_duration,
+                picked_sample,
+                instrument_used,
+                sample_length,
+                loops,
+                fallback_piano,
+            )
 
     def _fallback_sound(self, midi_pitch: int, duration: float) -> pygame.mixer.Sound:
         duration_bucket = int(round(max(0.35, min(1.6, duration)) * 10))
@@ -2507,7 +2631,131 @@ class LocalOrchestraAccompaniment:
             max(0.0, time.monotonic() - anchor_time)
             * max(self._MIN_TEMPO_RATIO, self._tempo_ratio)
         )
+        next_target_time = self._master_next_target_time
+        if next_target_time is not None and next_target_time > target_time:
+            cap = max(target_time, float(next_target_time) - self._PLAYHEAD_CAP_EPSILON)
+            projected = min(projected, cap)
+        else:
+            projected = target_time
         return max(target_time, projected)
+
+    def _print_debug_bank_summary(self) -> None:
+        instruments_in_score: dict[str, list[int]] = {}
+        for event in self._events:
+            instruments_in_score.setdefault(event.instrument, []).append(int(event.note))
+
+        bank_index = self._sample_bank._sample_index  # type: ignore[attr-defined]
+        print(
+            f"DEBUG_ORCH BANK total_events={len(self._events)} "
+            f"instruments_in_score={sorted(instruments_in_score)} "
+            f"instruments_in_bank={sorted(bank_index)}",
+            flush=True,
+        )
+        for instrument, notes in sorted(instruments_in_score.items()):
+            score_pitches = sorted(set(notes))
+            score_range = (min(score_pitches), max(score_pitches)) if score_pitches else (None, None)
+            bank_samples = bank_index.get(instrument) or bank_index.get(
+                fallback_local_orchestra_instrument(score_pitches[0]) if score_pitches else ""
+            )
+            if bank_samples:
+                bank_pitches = sorted({s.pitch for s in bank_samples if s.pitch is not None})
+                length_codes = sorted({s.length_code for s in bank_samples})
+                dynamics = sorted({s.dynamic for s in bank_samples})
+                bank_range = (min(bank_pitches), max(bank_pitches)) if bank_pitches else (None, None)
+                print(
+                    f"DEBUG_ORCH BANK_INSTR {instrument!r} score_notes={len(notes)} "
+                    f"score_range={score_range} bank_samples={len(bank_samples)} "
+                    f"bank_pitch_range={bank_range} bank_pitches={bank_pitches} "
+                    f"length_codes={length_codes} dynamics={dynamics}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"DEBUG_ORCH BANK_INSTR {instrument!r} score_notes={len(notes)} "
+                    f"score_range={score_range} bank_samples=NONE (will fallback)",
+                    flush=True,
+                )
+
+    def _record_debug_emit(
+        self,
+        event: LocalOrchestraNoteEvent,
+        scaled_duration: float,
+        picked_sample: LocalOrchestraSample | None,
+        instrument_used: str,
+        sample_length: float,
+        loops: int,
+        fallback_piano: bool,
+    ) -> None:
+        with self._state_lock:
+            playhead = self._projected_master_time_locked()
+        playhead_value = float(playhead) if playhead is not None else float(event.source_time)
+        lag = playhead_value - float(event.source_time)
+        sample_pitch = picked_sample.pitch if picked_sample is not None else None
+        if sample_pitch is None:
+            semitone_off = 0
+        else:
+            semitone_off = int(event.note) - int(sample_pitch)
+        length_code = picked_sample.length_code if picked_sample is not None else "-"
+        dispatch_age = (
+            (time.monotonic() - self._debug_last_dispatch_wall)
+            if self._debug_last_dispatch_wall is not None
+            else float("nan")
+        )
+
+        stats = self._debug_stats
+        stats["emits"] += 1
+        stats["lag_sum"] += lag
+        if lag > stats["lag_max"]:
+            stats["lag_max"] = lag
+        if loops > 0:
+            stats["loops_nonzero"] += 1
+        if fallback_piano:
+            stats["fallback_pitch_used"] += 1
+        if instrument_used != event.instrument:
+            stats["instrument_fallback"] += 1
+        stats["semitone_offset_sum"] += abs(semitone_off)
+        if abs(semitone_off) > stats["semitone_offset_max"]:
+            stats["semitone_offset_max"] = abs(semitone_off)
+        if semitone_off == 0 and picked_sample is not None:
+            stats["exact_pitch"] += 1
+        if not (dispatch_age != dispatch_age):  # not NaN
+            stats["dispatch_age_sum"] += dispatch_age
+            if dispatch_age > stats["dispatch_age_max"]:
+                stats["dispatch_age_max"] = dispatch_age
+
+        print(
+            f"DEBUG_ORCH EMIT "
+            f"{time.monotonic() - self._debug_start_wall:.3f},"
+            f"{event.source_time:.3f},{playhead_value:.3f},{lag:+.3f},"
+            f"{event.note},{event.instrument!r},{instrument_used!r},"
+            f"{sample_pitch},{semitone_off:+d},{length_code},{sample_length:.3f},"
+            f"{scaled_duration:.3f},{loops},{dispatch_age:.3f},{event.velocity},"
+            f"{int(fallback_piano)}",
+            flush=True,
+        )
+
+    def _print_debug_summary(self) -> None:
+        stats = self._debug_stats
+        emits = max(1, int(stats["emits"]))
+        elapsed = time.monotonic() - self._debug_start_wall
+        print(
+            "DEBUG_ORCH SUMMARY "
+            f"elapsed={elapsed:.2f}s emits={stats['emits']} "
+            f"dispatches={self._debug_dispatch_count} seeks={self._debug_seek_count} "
+            f"stale_dispatches={stats['stale_dispatches']} "
+            f"duplicate_dispatches={stats['duplicate_dispatches']} "
+            f"backward_rewinds={stats['backward_rewinds']} "
+            f"avg_lag={stats['lag_sum']/emits:+.3f}s max_lag={stats['lag_max']:+.3f}s "
+            f"loops_nonzero={stats['loops_nonzero']}/{stats['emits']} "
+            f"avg_semitone_off={stats['semitone_offset_sum']/emits:.2f} "
+            f"max_semitone_off={stats['semitone_offset_max']} "
+            f"exact_pitch={stats['exact_pitch']}/{stats['emits']} "
+            f"instrument_fallback={stats['instrument_fallback']} "
+            f"fallback_piano={stats['fallback_pitch_used']} "
+            f"avg_dispatch_age={stats['dispatch_age_sum']/emits:.3f}s "
+            f"max_dispatch_age={stats['dispatch_age_max']:.3f}s",
+            flush=True,
+        )
 
 
 def draw_text(
