@@ -1250,15 +1250,7 @@ class HandPracticeScheduledNoteOff:
 
 
 def dispatcher_event_anchor_time(dispatcher: ScoreEventDispatcher, clock: Callable[[], float]) -> float:
-    now = float(clock())
-    event_timestamp = getattr(dispatcher, "current_event_timestamp", None)
-    if not isinstance(event_timestamp, (int, float)):
-        return now
-
-    event_time = float(event_timestamp)
-    if (now - 2.0) <= event_time <= (now + 0.05):
-        return min(event_time, now)
-    return now
+    return dispatcher.event_anchor_time(clock)
 
 
 def load_hand_practice_note_events(midi_path: str | Path) -> list[HandPracticeNoteEvent]:
@@ -4059,6 +4051,12 @@ def main() -> int:
                     ),
                     force_instrument=orchestra_force_instrument,
                     volume_scale=orchestra_volume_scale,
+                    # Match the dispatcher's monotonic-clock event timestamps
+                    # so `event_anchor_time` can pace orchestra playback off
+                    # the soloist's actual note time instead of the (later)
+                    # callback wake-up.
+                    time_source=time.monotonic,
+                    wall_clock=time.monotonic,
                 )
                 if merge_orchestra_to_channel:
                     orchestra_engine_label = (

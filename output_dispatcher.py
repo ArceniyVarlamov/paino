@@ -401,6 +401,25 @@ class ScoreEventDispatcher:
             if callback in self._callbacks:
                 self._callbacks.remove(callback)
 
+    def event_anchor_time(self, clock: Callable[[], float]) -> float:
+        """Best-effort wall-clock anchor for the most recently broadcast event.
+
+        Returns the broadcast's `event_timestamp` when it sits within a small
+        sanity window around `clock()`, so callers can pace playback from the
+        moment the soloist actually played the note rather than the (later)
+        moment the dispatcher worker delivered the callback. Falls back to
+        `clock()` when no broadcast has happened yet, or when the timestamps
+        live in different clock epochs (e.g. `time.monotonic` vs `time.time`).
+        """
+        now = float(clock())
+        event_timestamp = self.current_event_timestamp
+        if not isinstance(event_timestamp, (int, float)):
+            return now
+        event_time = float(event_timestamp)
+        if (now - 2.0) <= event_time <= (now + 0.05):
+            return min(event_time, now)
+        return now
+
     def broadcast(self, current_index: int, timestamp: float, *, tempo_update: bool = True) -> None:
         self.start()
         event = DispatchEvent(

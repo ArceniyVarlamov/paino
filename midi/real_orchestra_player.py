@@ -651,7 +651,11 @@ class DynamicOrchestraPlayer:
         new_index = int(index)
         new_target_time = self._score_index_to_target_time(new_index)
         new_next_target_time = self._score_index_to_next_target_time(new_index)
-        new_anchor_clock_time = self._clock()
+        # Anchor pacing on the soloist's actual event time when possible — the
+        # dispatcher worker thread can fire this callback well after the note
+        # was captured, and using `self._clock()` here would bake that delay
+        # into every subsequent inter-event deadline.
+        new_anchor_clock_time = self._dispatcher.event_anchor_time(self._clock)
         with self._tempo_lock:
             previous_index = self._master_index
             previous_target_time = self._master_target_time
@@ -677,6 +681,10 @@ class DynamicOrchestraPlayer:
             self._master_target_time = new_target_time
             self._master_anchor_clock_time = new_anchor_clock_time
             self._master_next_target_time = new_next_target_time
+            # Bump the transport generation so any in-flight inter-event wait
+            # in `_play_loop` aborts and recomputes its deadline against the
+            # freshly committed anchor instead of the stale last-emit time.
+            self._transport_generation += 1
 
             if previous_target_time is None:
                 self._seek_request_time = new_target_time
@@ -857,17 +865,22 @@ class DynamicOrchestraPlayer:
         tempo_ratio: float,
         transport_generation: int,
     ) -> bool:
-        if self._last_emitted_source_time is None or self._last_emit_wall_time is None:
+        # Pace each event off the master anchor (set when the soloist played
+        # their last note) instead of `_last_emit_wall_time`. The latter
+        # locks the orchestra into whatever lag it had on the previous emit
+        # and prevents catch-up after `tempo_ratio` adapts, which manifested
+        # as a steadily-accumulating live-input delay.
+        with self._tempo_lock:
+            master_anchor = self._master_anchor_clock_time
+            master_target = self._master_target_time
+
+        if master_anchor is None or master_target is None:
             return True
 
-        source_gap = max(0.0, float(event.source_time - self._last_emitted_source_time))
-        if source_gap <= 1e-6:
-            return True
-
-        sleep_for = source_gap / tempo_ratio
-        if sleep_for <= 1e-4:
-            return True
-        deadline = self._last_emit_wall_time + sleep_for
+        safe_tempo = max(self._MIN_TEMPO_RATIO, float(tempo_ratio))
+        deadline = float(master_anchor) + (
+            (float(event.source_time) - float(master_target)) / safe_tempo
+        )
         return self._sleep_until(deadline, transport_generation)
 
     def _emit_event(self, event: TimedPlaybackEvent, tempo_ratio: float) -> None:
